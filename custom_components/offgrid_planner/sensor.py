@@ -34,6 +34,27 @@ def _planning(d: PlannerData) -> ScenarioPlan:
     return d.plan.scenarios[d.plan.planning_scenario]
 
 
+def _week(d: PlannerData) -> list[dict[str, Any]]:
+    """One row per local day for dashboards: expected vs bad-week solar, load and SOC."""
+    expected = {x.day: x for x in d.daily.get(SCENARIO_EXPECTED, [])}
+    planning = {x.day: x for x in d.daily.get(d.plan.planning_scenario, [])}
+    rows = []
+    for day in sorted(set(expected) | set(planning)):
+        e, p = expected.get(day), planning.get(day) or expected.get(day)
+        rows.append({
+            "date": day.isoformat(),
+            "pv_kwh": round(e.pv_wh / 1000, 2) if e else None,
+            "pv_bad_kwh": round(p.pv_wh / 1000, 2),
+            "load_kwh": round(p.load_no_action_wh / 1000, 2),
+            "load_planned_kwh": round(p.load_wh / 1000, 2),
+            "min_soc": round(p.min_soc),
+            "min_soc_no_action": round(p.min_soc_no_action),
+            "end_soc": round(p.end_soc),
+            "generator_h": p.generator_hours,
+        })
+    return rows
+
+
 def _advice(d: PlannerData) -> str:
     sc = _planning(d)
     if sc.status == Status.GENERATOR:
@@ -59,7 +80,7 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
     PlannerSensorDescription(
         key="status", device_class=SensorDeviceClass.ENUM, options=STATUS_OPTIONS,
         value=lambda d: d.plan.status.name.lower(),
-        attrs=lambda d: {"advice": _advice(d), "planning_scenario": d.plan.planning_scenario,
+        attrs=lambda d: {"advice": _advice(d), "week": _week(d), "planning_scenario": d.plan.planning_scenario,
                          "shed_loads": _planning(d).shed_loads,
                          "tilt_recommended": _expected(d).tilt_recommended,
                          "weather_stale": d.weather_stale}),
@@ -81,6 +102,17 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
     PlannerSensorDescription(
         key="pv_today", native_unit_of_measurement=UnitOfEnergy.WATT_HOUR, device_class=SensorDeviceClass.ENERGY,
         suggested_display_precision=0, value=lambda d: round(_expected(d).pv_today_wh)),
+    PlannerSensorDescription(
+        key="pv_today_full", native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY, suggested_display_precision=0,
+        value=lambda d: round(_expected(d).pv_today_full_wh)),
+    PlannerSensorDescription(
+        key="load_model_check", state_class=SensorStateClass.MEASUREMENT, suggested_display_precision=2,
+        value=lambda d: round(d.load_check.ratio, 2) if d.load_check else None,
+        attrs=lambda d: ({"measured_wh": d.load_check.measured_wh, "modelled_wh": d.load_check.modelled_wh,
+                          "hours": d.load_check.hours, "night_start": d.load_check.night_start,
+                          "night_end": d.load_check.night_end} if d.load_check else
+                         {"note": "Needs a battery power sensor and one night of data."})),
     PlannerSensorDescription(
         key="pv_tomorrow", native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY, suggested_display_precision=0,
@@ -159,7 +191,7 @@ class LearningSensor(OffgridEntity, SensorEntity):
 class PlannerSensor(OffgridEntity, SensorEntity):
     entity_description: PlannerSensorDescription
     # The hourly SOC trajectory is for charts only; keep it out of the recorder (SD card).
-    _unrecorded_attributes = frozenset({"soc_forecast"})
+    _unrecorded_attributes = frozenset({"soc_forecast", "week"})
 
     def __init__(self, coordinator, description: PlannerSensorDescription) -> None:
         super().__init__(coordinator, description.key)

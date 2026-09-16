@@ -45,6 +45,7 @@ from .const import (
     DOMAIN,
     FETCH_TIMEOUT_S,
     LEARN_SAMPLE_INTERVAL,
+    METER_SAMPLE_INTERVAL,
     MOVE_REFETCH_KM,
     NUMBER_DEFAULTS,
     NUMBER_RESERVE,
@@ -59,8 +60,9 @@ from .const import (
 )
 from .core.battery import BatteryConfig, GeneratorConfig
 from .core.learn import Learner, Mode, Phase, apply_to_description
+from .core.loadcheck import EnergyMeter, LoadCheck, hour_key, last_night
 from .core.loads import BaseLoad, Load, LoadModel, parse_load
-from .core.planner import Plan, PlannerConfig, make_plan
+from .core.planner import DaySummary, Plan, PlannerConfig, daily_summary, make_plan
 from .core.pv import ArrayConfig, TiltPlan
 from .core.weather import (
     ENSEMBLE_URL,
@@ -84,6 +86,8 @@ class PlannerData:
     weather_fetched: datetime | None
     weather_stale: bool
     loads: list[Load]
+    daily: dict[str, list[DaySummary]]
+    load_check: LoadCheck | None
 
 
 def _km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -111,12 +115,17 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         self.learn_last_w: float | None = None
         self._learn_unsub: CALLBACK_TYPE | None = None
         self._shed_listeners: list[Callable[[], None]] = []
+        self.meter = EnergyMeter()
+        self._meter_store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.meter")
 
     def opt(self, key: str) -> Any:
         return self.config_entry.options.get(key, self.config_entry.data.get(key, DEFAULTS.get(key)))
 
     async def async_load_cache(self) -> None:
         self._cache = await self._store.async_load() or {}
+        meter = await self._meter_store.async_load()
+        if meter:
+            self.meter.hours = meter.get("hours", {})
         stored = await self._shed_store.async_load()
         if stored is None:
             self.shed_items = [{"uid": uuid.uuid4().hex, "summary": name, "description": desc,
@@ -145,6 +154,24 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
 
     def shed_item(self, uid: str | None) -> dict[str, Any] | None:
         return next((i for i in self.shed_items if i["uid"] == uid), None)
+
+    # --- measured load (for the model check) -----------------------------------------
+
+    @callback
+    def async_start_meter(self) -> CALLBACK_TYPE | None:
+        if not self.opt(CONF_BATTERY_POWER):
+            return None
+        return async_track_time_interval(self.hass, self._async_meter_sample, METER_SAMPLE_INTERVAL)
+
+    async def _async_meter_sample(self, now: datetime) -> None:
+        state = self.hass.states.get(self.opt(CONF_BATTERY_POWER))
+        try:
+            discharge_w = -float(state.state) if state else None
+        except ValueError:
+            discharge_w = None
+        self.meter.add(now, discharge_w)
+        # Batch writes: the SD card doesn't need a save every few seconds.
+        self._meter_store.async_delay_save(lambda: {"hours": self.meter.hours}, 600)
 
     # --- learning ------------------------------------------------------------------
 
@@ -307,6 +334,14 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
             make_plan, scenarios, now, soc, lat, lon, array, battery, load_model, generator, cfg,
             SCENARIO_BAD if SCENARIO_BAD in scenarios else SCENARIO_EXPECTED)
 
+        daily = {name: daily_summary(sc, tz) for name, sc in plan.scenarios.items()}
+
+        self.meter.prune(now)
+        past = [p for p in scenarios[SCENARIO_EXPECTED] if p.start < now]
+        modelled = {hour_key(p.start): w for p, w in zip(past, load_model.series(past), strict=True)}
+        check = last_night(now, lat, lon, self.meter, modelled)
+
         fetched = dt_util.parse_datetime(self._cache["fetched"])
         return PlannerData(plan=plan, soc=soc, weather_fetched=fetched,
-                           weather_stale=now - fetched > WEATHER_STALE_AFTER, loads=loads)
+                           weather_stale=now - fetched > WEATHER_STALE_AFTER, loads=loads,
+                           daily=daily, load_check=check)

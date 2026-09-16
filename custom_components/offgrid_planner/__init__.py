@@ -15,6 +15,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OffgridConfigEntry) -> b
     entry.runtime_data = coordinator
     # Numbers restore their values first, then trigger the first plan.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    if unsub_meter := coordinator.async_start_meter():
+        entry.async_on_unload(unsub_meter)
     await coordinator.async_refresh()
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True

@@ -58,6 +58,7 @@ class SimResult:
     generator_hours: float
     generator_first_start: dt.datetime | None
     fuel_l: float
+    generator_on: list[bool] = field(default_factory=list)  # per period
 
 
 def simulate(periods: list[WeatherPeriod], soc_start: float, pv_w: list[float], load_w: list[float],
@@ -69,6 +70,7 @@ def simulate(periods: list[WeatherPeriod], soc_start: float, pv_w: list[float], 
     min_soc, min_at, first_below, empty_at = soc_start, None, None, None
     curtailed = unmet = gen_h = 0.0
     gen_on, gen_first = False, None
+    gen_flags: list[bool] = []
     for p, pv, load in zip(periods, pv_w, load_w, strict=True):
         pct = energy / cap * 100
         if generator is not None:
@@ -78,6 +80,7 @@ def simulate(periods: list[WeatherPeriod], soc_start: float, pv_w: list[float], 
                 gen_on = True
                 gen_first = gen_first or p.start
         gen = generator.charge_w if gen_on else 0.0
+        gen_flags.append(gen_on)
         if gen_on:
             gen_h += p.hours
         net_wh = (pv + gen - load) * p.hours
@@ -101,4 +104,4 @@ def simulate(periods: list[WeatherPeriod], soc_start: float, pv_w: list[float], 
         if first_below is None and pct < reserve_soc:
             first_below = p.start
     fuel = gen_h * generator.fuel_l_per_h() if generator else 0.0
-    return SimResult(soc, min_soc, min_at, first_below, empty_at, curtailed, unmet, gen_h, gen_first, fuel)
+    return SimResult(soc, min_soc, min_at, first_below, empty_at, curtailed, unmet, gen_h, gen_first, fuel, gen_flags)

@@ -58,6 +58,7 @@ NUMBER_DEFAULTS = {NUMBER_RESERVE: 20.0, NUMBER_SITE_HORIZON: 1.0}
 
 SHED_STORAGE_KEY = "shed_list"
 LEARN_SAMPLE_INTERVAL = timedelta(seconds=1)
+METER_SAMPLE_INTERVAL = timedelta(seconds=5)
 
 # Seeded once when the integration is added; edit freely in the to-do list.
 DEFAULT_SHED_LIST = (

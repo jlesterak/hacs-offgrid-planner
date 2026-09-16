@@ -101,7 +101,7 @@
         "name": "Reserve reached without action"
       },
       "pv_today": {
-        "name": "Solar today"
+        "name": "Solar rest of today"
       },
       "pv_tomorrow": {
         "name": "Solar tomorrow"
@@ -134,6 +134,12 @@
           "done": "Done",
           "failed": "Failed"
         }
+      },
+      "pv_today_full": {
+        "name": "Solar today (whole day)"
+      },
+      "load_model_check": {
+        "name": "Load model check"
       }
     },
     "binary_sensor": {

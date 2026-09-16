@@ -91,6 +91,7 @@ async def test_setup_creates_entities_and_plans(hass: HomeAssistant, env, aiocli
     assert status is not None and status.state in ("ok", "tilt", "shed", "generator")
     assert status.attributes["planning_scenario"] == "bad_week"
     assert float(hass.states.get("sensor.off_grid_planner_solar_tomorrow").state) > 3000
+    assert hass.states.get("sensor.off_grid_planner_solar_rest_of_today") is not None
     assert hass.states.get("number.off_grid_planner_reserve_soc").state == "20.0"
     assert hass.states.get("sensor.off_grid_planner_learning").state == "idle"
     for _method, url, *_ in aioclient_mock.mock_calls:
@@ -213,3 +214,38 @@ async def test_reserve_number_replans(hass: HomeAssistant, env, aioclient_mock) 
                                    {"entity_id": "number.off_grid_planner_reserve_soc", "value": 35}, blocking=True)
     await hass.async_block_till_done()
     assert entry.runtime_data.numbers[NUMBER_RESERVE] == 35
+
+
+async def test_week_summary_and_whole_day_solar(hass: HomeAssistant, env, aioclient_mock) -> None:
+    await _setup(hass, aioclient_mock)
+    status = hass.states.get("sensor.off_grid_planner_status")
+    week = status.attributes["week"]
+    assert 7 <= len(week) <= 8
+    assert {"date", "pv_kwh", "pv_bad_kwh", "load_kwh", "min_soc", "min_soc_no_action", "generator_h"} <= set(week[0])
+    assert all(r["pv_bad_kwh"] <= r["pv_kwh"] + 1e-6 for r in week)
+    whole = float(hass.states.get("sensor.off_grid_planner_solar_today_whole_day").state)
+    assert whole >= float(hass.states.get("sensor.off_grid_planner_solar_rest_of_today").state)
+
+
+async def test_load_model_check_from_metered_night(hass: HomeAssistant, env, aioclient_mock, freezer) -> None:
+    entry = await _setup(hass, aioclient_mock)
+    coordinator = entry.runtime_data
+    from custom_components.offgrid_planner.core.loadcheck import hour_key
+    # Pretend the meter ran all of last night at 150 W discharge.
+    now = dt_util.utcnow()
+    for h in range(1, 30):
+        start = (now - dt.timedelta(hours=h)).replace(minute=0, second=0, microsecond=0)
+        coordinator.meter.hours[hour_key(start)] = [150.0, 3600.0]
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    check = hass.states.get("sensor.off_grid_planner_load_model_check")
+    assert check is not None and check.state not in ("unknown", "unavailable")
+    assert check.attributes["hours"] >= 4
+    ratio = check.attributes["measured_wh"] / check.attributes["modelled_wh"]
+    assert float(check.state) == pytest.approx(ratio, abs=0.01)
+    # Live metering integrates the battery power sensor (-45 W = 45 W discharge).
+    for _ in range(4):
+        freezer.tick(dt.timedelta(seconds=5))
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+    assert coordinator.meter.last_discharge_w == 45.0

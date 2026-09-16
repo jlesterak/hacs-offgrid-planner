@@ -38,7 +38,8 @@ class PlannerConfig:
 @dataclass
 class ScenarioPlan:
     name: str
-    pv_today_wh: float
+    pv_today_wh: float  # rest of today, from now
+    pv_today_full_wh: float  # whole local day, including hours already past
     pv_tomorrow_wh: float
     pv_horizon_wh: float
     load_horizon_wh: float
@@ -51,6 +52,23 @@ class ScenarioPlan:
     with_plan: SimResult  # the chosen tilt/shed/generator plan
     generator_needed: bool
     status: Status
+    # Hourly series for the horizon (same length as the SOC lists), for daily summaries and charts.
+    starts: list[dt.datetime] = field(default_factory=list)
+    pv_w: list[float] = field(default_factory=list)
+    load_w: list[float] = field(default_factory=list)  # with the chosen shedding
+    load_no_action_w: list[float] = field(default_factory=list)
+
+
+@dataclass
+class DaySummary:
+    day: dt.date
+    pv_wh: float
+    load_wh: float  # with the chosen shedding
+    load_no_action_wh: float
+    min_soc: float  # with the plan
+    min_soc_no_action: float
+    end_soc: float
+    generator_hours: float = 0.0
 
 
 @dataclass
@@ -94,6 +112,7 @@ def _generator_plan(periods, soc_now, pv, load, battery, reserve, generator) -> 
 def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc_now: float,
                   lat: float, lon: float, array: ArrayConfig, battery: BatteryConfig, loads: LoadModel,
                   generator: GeneratorConfig | None, cfg: PlannerConfig) -> ScenarioPlan:
+    all_periods = periods
     periods = _window(periods, now, cfg.horizon_hours)
     reserve = cfg.reserve_soc
     flat = pv_series(periods, lat, lon, array)
@@ -125,8 +144,10 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
 
     generator_needed = shed_level is None
     if generator_needed:
-        full_shed = loads.series(periods, len(loads.sheddable()))
-        chosen = _generator_plan(periods, soc_now, pv, full_shed, battery, reserve, generator)
+        plan_load = loads.series(periods, len(loads.sheddable()))
+        chosen = _generator_plan(periods, soc_now, pv, plan_load, battery, reserve, generator)
+    else:
+        plan_load = loads.series(periods, shed_level) if shed_level else base_load
     shed_names = [ld.name for ld in loads.sheddable()[: shed_level if shed_level is not None
                                                          else len(loads.sheddable())]]
     saving = sum(loads.daily_wh(ld) for ld in loads.sheddable() if ld.name in shed_names)
@@ -141,9 +162,13 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
     else:
         status = Status.OK
 
+    today_periods = [p for p in all_periods if on(today)(p)]
+    today_pv = pv_series(today_periods, lat, lon, array, cfg.tilt if tilt_ok else None)
+
     return ScenarioPlan(
         name=name,
         pv_today_wh=_day_energy(periods, pv, on(today)),
+        pv_today_full_wh=sum(w * p.hours for p, w in zip(today_periods, today_pv, strict=True)),
         pv_tomorrow_wh=_day_energy(periods, pv, on(today + dt.timedelta(days=1))),
         pv_horizon_wh=sum(w * p.hours for p, w in zip(periods, pv, strict=True)),
         load_horizon_wh=sum(w * p.hours for p, w in zip(periods, base_load, strict=True)),
@@ -156,7 +181,34 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
         with_plan=chosen,
         generator_needed=generator_needed,
         status=status,
+        starts=[p.start for p in periods],
+        pv_w=pv,
+        load_w=plan_load,
+        load_no_action_w=base_load,
     )
+
+
+def daily_summary(sc: ScenarioPlan, tz: str) -> list[DaySummary]:
+    """Per local day: energy in and out, lowest and end-of-day SOC, with and without the plan."""
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(tz)
+    days: dict[dt.date, DaySummary] = {}
+    gen_on = sc.generator_needed
+    for i, start in enumerate(sc.starts):
+        day = (start + dt.timedelta(minutes=30)).astimezone(zone).date()
+        d = days.get(day)
+        if d is None:
+            d = days[day] = DaySummary(day, 0.0, 0.0, 0.0, 101.0, 101.0, 0.0)
+        d.pv_wh += sc.pv_w[i]
+        d.load_wh += sc.load_w[i]
+        d.load_no_action_wh += sc.load_no_action_w[i]
+        d.min_soc = min(d.min_soc, sc.with_plan.soc[i])
+        d.min_soc_no_action = min(d.min_soc_no_action, sc.no_action.soc[i])
+        d.end_soc = sc.with_plan.soc[i]
+        if gen_on and sc.with_plan.generator_on and sc.with_plan.generator_on[i]:
+            d.generator_hours += 1.0
+    return list(days.values())
 
 
 def make_plan(scenarios: dict[str, list[WeatherPeriod]], now: dt.datetime, soc_now: float,
