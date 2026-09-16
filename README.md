@@ -49,3 +49,7 @@ UV_CACHE_DIR=.tools/uv-cache UV_PYTHON_INSTALL_DIR=.tools/python .venv/bin/uv ve
 ```
 
 Status: early (0.1.0), calibrated on one 1.58 kW flat-roof trailer array in Colorado.
+
+## License
+
+The Unlicense: public domain. See [LICENSE](LICENSE).
