@@ -16,10 +16,16 @@ This one assumes it isn't.
   Fetched hourly when online and cached, so planning continues offline.
 - PV: plane-of-array irradiance for flat or tilted panels, a measured low-sun factor for flat roof arrays,
   a per-site horizon factor (open desert < 1 < trees/canyon), temperature derating.
-- Loads: an always-on base (baseline, fridge, heating vs outdoor temperature) plus a **to-do list as the
-  shed order** — drag to reprioritise on your phone. Item description format:
+- Loads: an always-on base (baseline, fridge, heating vs outdoor temperature) plus the **Shed order** to-do
+  list the integration creates (seeded with examples). Add, edit, delete, check off and drag to reprioritise
+  in the To-do panel; the plan updates immediately. Item description format:
   `1200 W, 0.3 h/day, 7-10, weekdays` · add `essential` to never shed · `DC` for loads that bypass the
   inverter · check an item off when the load isn't in use.
+- **Learn a load**: pick it in *Load to learn*, press *Start learning*, keep it off for ~20 s, switch it on
+  when *Learning* says so, then off again (or press *Finish learning* in *Average over cycles* mode for
+  cycling loads such as an ice maker). The measured battery-side watts replace the estimate in the item.
+  Needs a fast battery power sensor (a shunt at ~1 Hz). By day, add a solar power sensor or learn with
+  steady sun; a full battery hides load changes.
 - Battery: 7-day hourly SOC simulation with curtailment when full, then a search for the smallest shed level
   and, if that isn't enough, the earliest generator start that keeps SOC above the reserve.
 

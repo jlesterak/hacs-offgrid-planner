@@ -5,6 +5,7 @@ Loads can come from a Home Assistant to-do list: the item order is the shed prio
     "1200 W, 0.3 h/day, 7-10, weekdays"      espresso machine, mornings on weekdays
     "60 W, 15 h/day, 8-17, weekdays, DC"     Starlink, only while the internet schedule allows
     "35 W, 24 h/day, essential"              never shed
+    "1150 W measured, 0.3 h/day, 7-10"       learned at the battery: inverter losses already included
 A completed (checked) item is a load that is not in use at all.
 """
 from __future__ import annotations
@@ -64,9 +65,9 @@ class BaseLoad:
 
     baseline_w: float = 43.0  # night baseline, 2026-09-14/16
     fridge_w: float = 27.0  # average (compressor duty)
-    # Furnace blower: Wh per (°C below balance) per hour of outdoor temperature. Default is a
-    # placeholder until fitted from furnace runs against outdoor temperature.
-    heat_w_per_degc: float = 1.0
+    # Furnace blower: average W per °C of outdoor temperature below the balance point. Fitted from
+    # furnace runs on the 2026-09-14/16 nights (mild, ~10–12 °C): ~1.2–1.4. Refit in winter.
+    heat_w_per_degc: float = 1.3
     heat_balance_c: float = 15.0
 
     def mean_w(self, temp_c: float) -> float:
@@ -129,7 +130,7 @@ def parse_load(summary: str, description: str | None, completed: bool = False) -
         hours_per_day=float(h.group(1)) if h else 24.0,
         window=(_hour(win.group(1)), _hour(win.group(2))) if win else None,
         days=days,
-        ac=not re.search(r"\bdc\b", low),
+        ac=not re.search(r"\b(dc|measured)\b", low),
         essential=bool(re.search(r"\b(essential|never shed|keep)\b", low)),
         in_use=not completed,
     )

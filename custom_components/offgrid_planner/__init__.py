@@ -6,7 +6,7 @@ from homeassistant.core import HomeAssistant
 
 from .coordinator import OffgridConfigEntry, OffgridCoordinator
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.NUMBER, Platform.SENSOR]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.NUMBER, Platform.SELECT, Platform.SENSOR, Platform.TODO]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: OffgridConfigEntry) -> bool:
@@ -21,6 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OffgridConfigEntry) -> b
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: OffgridConfigEntry) -> bool:
+    entry.runtime_data.async_learn_cancel()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 

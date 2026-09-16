@@ -19,6 +19,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import SCENARIO_EXPECTED
 from .coordinator import OffgridConfigEntry, PlannerData
+from .core.learn import Phase
 from .core.planner import ScenarioPlan, Status
 from .entity import OffgridEntity
 
@@ -110,7 +111,49 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
 async def async_setup_entry(hass: HomeAssistant, entry: OffgridConfigEntry,
                             async_add_entities: AddConfigEntryEntitiesCallback) -> None:
     coordinator = entry.runtime_data
-    async_add_entities(PlannerSensor(coordinator, desc) for desc in SENSORS)
+    async_add_entities([*(PlannerSensor(coordinator, desc) for desc in SENSORS), LearningSensor(coordinator)])
+
+
+class LearningSensor(OffgridEntity, SensorEntity):
+    """Progress and instructions while learning a load."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [p.value for p in Phase]
+    # Changes every second while learning; don't write it to the recorder.
+    _unrecorded_attributes = frozenset({"load_power_now_w"})
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "learning")
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(self.coordinator.async_add_shed_listener(self.async_write_ha_state))
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self) -> str:
+        learner = self.coordinator.learner
+        return learner.phase.value if learner else Phase.IDLE.value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        c = self.coordinator
+        learner = c.learner
+        item = c.shed_item(c.learn_uid)
+        attrs: dict[str, Any] = {"load": item["summary"] if item else None, "mode": c.learn_mode.value,
+                                 "load_power_now_w": None if c.learn_last_w is None else round(c.learn_last_w)}
+        if learner:
+            attrs["message"] = learner.message
+            attrs["baseline_w"] = None if learner.baseline_w is None else round(learner.baseline_w)
+            if learner.result:
+                attrs.update(result_w=learner.result.watts, spread_w=learner.result.spread_w,
+                             confident=learner.result.confident, samples=learner.result.samples)
+        else:
+            attrs["message"] = "Pick a load, press Start, then switch the load on when told."
+        return attrs
 
 
 class PlannerSensor(OffgridEntity, SensorEntity):

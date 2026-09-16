@@ -3,10 +3,11 @@
     "step": {
       "user": {
         "title": "Off-Grid Planner",
-        "description": "Forecast-driven advice for tilting, shedding loads and running a generator. Location follows Home Assistant's home location.",
+        "description": "Forecast-driven advice for tilting, shedding loads and running a generator. Location follows Home Assistant's home location. A shed-order to-do list is created with example loads: edit, reorder (top = shed first) or learn them.",
         "data": {
           "soc_entity": "Battery state of charge",
-          "loads_todo": "Shed-order to-do list",
+          "battery_power_entity": "Battery power sensor (for learning loads)",
+          "pv_power_entity": "Solar power sensor (optional)",
           "capacity_wh": "Battery usable capacity",
           "rated_w": "Solar array rated power",
           "system_factor": "PV system factor",
@@ -26,14 +27,15 @@
         },
         "data_description": {
           "soc_entity": "Battery SOC sensor (%), ideally from a shunt.",
-          "loads_todo": "Top item is shed first. Description: e.g. '1200 W, 0.3 h/day, 7-10, weekdays'. Add 'essential' to never shed, 'DC' for loads that bypass the inverter. Check an item off when the load is not in use.",
           "system_factor": "Measured output ÷ rated output at high sun (0.68 for a flat roof array).",
           "baseline_w": "Average battery draw of everything not on the shed list, excluding fridge and heat.",
           "heat_w_per_degc": "Furnace blower average watts per °C of outdoor temperature below 15 °C.",
           "tilt_deg": "How far the trailer can be tilted by day (0 = never).",
           "tilt_azimuth": "Compass direction the panels face when tilted (180 = south).",
           "jack_wh_per_day": "Energy to raise and lower the tongue jack once.",
-          "use_ensemble": "Also downloads an ensemble forecast and plans against its darkest 10%."
+          "use_ensemble": "Also downloads an ensemble forecast and plans against its darkest 10%.",
+          "battery_power_entity": "Watts, positive while charging (e.g. a shunt power sensor updating every second).",
+          "pv_power_entity": "Watts. Lets you learn loads by day; without it, learn at night or with steady sun. A full battery hides load changes."
         }
       }
     }
@@ -44,7 +46,8 @@
         "title": "Off-Grid Planner",
         "data": {
           "soc_entity": "Battery state of charge",
-          "loads_todo": "Shed-order to-do list",
+          "battery_power_entity": "Battery power sensor (for learning loads)",
+          "pv_power_entity": "Solar power sensor (optional)",
           "capacity_wh": "Battery usable capacity",
           "rated_w": "Solar array rated power",
           "system_factor": "PV system factor",
@@ -64,14 +67,15 @@
         },
         "data_description": {
           "soc_entity": "Battery SOC sensor (%), ideally from a shunt.",
-          "loads_todo": "Top item is shed first. Description: e.g. '1200 W, 0.3 h/day, 7-10, weekdays'. Add 'essential' to never shed, 'DC' for loads that bypass the inverter. Check an item off when the load is not in use.",
           "system_factor": "Measured output ÷ rated output at high sun (0.68 for a flat roof array).",
           "baseline_w": "Average battery draw of everything not on the shed list, excluding fridge and heat.",
           "heat_w_per_degc": "Furnace blower average watts per °C of outdoor temperature below 15 °C.",
           "tilt_deg": "How far the trailer can be tilted by day (0 = never).",
           "tilt_azimuth": "Compass direction the panels face when tilted (180 = south).",
           "jack_wh_per_day": "Energy to raise and lower the tongue jack once.",
-          "use_ensemble": "Also downloads an ensemble forecast and plans against its darkest 10%."
+          "use_ensemble": "Also downloads an ensemble forecast and plans against its darkest 10%.",
+          "battery_power_entity": "Watts, positive while charging (e.g. a shunt power sensor updating every second).",
+          "pv_power_entity": "Watts. Lets you learn loads by day; without it, learn at night or with steady sun. A full battery hides load changes."
         }
       }
     }
@@ -119,6 +123,17 @@
       },
       "weather_updated": {
         "name": "Forecast downloaded"
+      },
+      "learning": {
+        "name": "Learning",
+        "state": {
+          "idle": "Idle",
+          "baseline": "Measuring baseline (keep load off)",
+          "waiting_for_load": "Switch the load on",
+          "measuring": "Measuring",
+          "done": "Done",
+          "failed": "Failed"
+        }
       }
     },
     "binary_sensor": {
@@ -138,6 +153,31 @@
       },
       "site_horizon": {
         "name": "Site horizon factor"
+      }
+    },
+    "todo": {
+      "shed_order": {
+        "name": "Shed order"
+      }
+    },
+    "select": {
+      "learn_load": {
+        "name": "Load to learn"
+      },
+      "learn_mode": {
+        "name": "Learning mode",
+        "state": {
+          "step": "Switch on, then off",
+          "average": "Average over cycles"
+        }
+      }
+    },
+    "button": {
+      "learn_start": {
+        "name": "Start learning"
+      },
+      "learn_finish": {
+        "name": "Finish learning"
       }
     }
   }

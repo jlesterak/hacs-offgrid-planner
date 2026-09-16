@@ -13,7 +13,8 @@ FETCH_TIMEOUT_S = 30
 STORAGE_VERSION = 1
 
 CONF_SOC_ENTITY = "soc_entity"
-CONF_LOADS_TODO = "loads_todo"
+CONF_BATTERY_POWER = "battery_power_entity"  # W, + = charging
+CONF_PV_POWER = "pv_power_entity"  # W, optional: subtracted when learning loads by day
 CONF_CAPACITY_WH = "capacity_wh"
 CONF_RATED_W = "rated_w"
 CONF_SYSTEM_FACTOR = "system_factor"
@@ -37,7 +38,7 @@ DEFAULTS = {
     CONF_SYSTEM_FACTOR: 0.68,
     CONF_BASELINE_W: 43,
     CONF_FRIDGE_W: 27,
-    CONF_HEAT_W_PER_DEGC: 1.0,
+    CONF_HEAT_W_PER_DEGC: 1.3,  # furnace blower, fitted on 2026-09-14/16 nights
     CONF_TILT_DEG: 10,
     CONF_TILT_AZIMUTH: 180,
     CONF_TILT_START: 9,
@@ -54,6 +55,20 @@ DEFAULTS = {
 NUMBER_RESERVE = "reserve_soc"
 NUMBER_SITE_HORIZON = "site_horizon"
 NUMBER_DEFAULTS = {NUMBER_RESERVE: 20.0, NUMBER_SITE_HORIZON: 1.0}
+
+SHED_STORAGE_KEY = "shed_list"
+LEARN_SAMPLE_INTERVAL = timedelta(seconds=1)
+
+# Seeded once when the integration is added; edit freely in the to-do list.
+DEFAULT_SHED_LIST = (
+    ("Espresso machine", "1200 W, 0.3 h/day, 7-10 (estimate)"),
+    ("Small dishwasher", "900 W, 1 h/day, 12-15 (estimate)"),
+    ("Ice maker", "120 W, 6 h/day, 10-18 (estimate)"),
+    ("NAS", "40 W, 4 h/day, 18-22 (estimate)"),
+    ("Internet: weekday evenings and nights", "60 W, 15 h/day, 17-8, weekdays (estimate)"),
+    ("Internet: weekends", "60 W, 24 h/day, weekends (estimate)"),
+    ("Internet: weekday work hours", "60 W, 9 h/day, 8-17, weekdays, essential (estimate)"),
+)
 
 SCENARIO_EXPECTED = "expected"
 SCENARIO_BAD = "bad_week"

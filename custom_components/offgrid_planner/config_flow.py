@@ -10,6 +10,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_BASELINE_W,
+    CONF_BATTERY_POWER,
     CONF_CAPACITY_WH,
     CONF_ENSEMBLE,
     CONF_FRIDGE_W,
@@ -19,7 +20,7 @@ from .const import (
     CONF_GENERATOR,
     CONF_HEAT_W_PER_DEGC,
     CONF_JACK_WH,
-    CONF_LOADS_TODO,
+    CONF_PV_POWER,
     CONF_RATED_W,
     CONF_SOC_ENTITY,
     CONF_SYSTEM_FACTOR,
@@ -43,12 +44,15 @@ def _schema(current: dict[str, Any]) -> vol.Schema:
     def d(key):
         return current.get(key, DEFAULTS.get(key))
 
-    todo = {vol.Optional(CONF_LOADS_TODO, description={"suggested_value": current.get(CONF_LOADS_TODO)}):
-            selector.EntitySelector(selector.EntitySelectorConfig(domain="todo"))}
+    power = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="power"))
+    optional_entities = {
+        vol.Optional(CONF_BATTERY_POWER, description={"suggested_value": current.get(CONF_BATTERY_POWER)}): power,
+        vol.Optional(CONF_PV_POWER, description={"suggested_value": current.get(CONF_PV_POWER)}): power,
+    }
     return vol.Schema({
         vol.Required(CONF_SOC_ENTITY, default=current.get(CONF_SOC_ENTITY, vol.UNDEFINED)):
             selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="battery")),
-        **todo,
+        **optional_entities,
         vol.Required(CONF_CAPACITY_WH, default=d(CONF_CAPACITY_WH)): _num(100, 200000, 10, "Wh"),
         vol.Required(CONF_RATED_W, default=d(CONF_RATED_W)): _num(10, 100000, 10, "W"),
         vol.Required(CONF_SYSTEM_FACTOR, default=d(CONF_SYSTEM_FACTOR)): _num(0.1, 1.2, 0.01),

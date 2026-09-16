@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -11,14 +13,16 @@ from typing import Any
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_BASELINE_W,
+    CONF_BATTERY_POWER,
     CONF_CAPACITY_WH,
     CONF_ENSEMBLE,
     CONF_FRIDGE_W,
@@ -28,7 +32,7 @@ from .const import (
     CONF_GENERATOR,
     CONF_HEAT_W_PER_DEGC,
     CONF_JACK_WH,
-    CONF_LOADS_TODO,
+    CONF_PV_POWER,
     CONF_RATED_W,
     CONF_SOC_ENTITY,
     CONF_SYSTEM_FACTOR,
@@ -36,9 +40,11 @@ from .const import (
     CONF_TILT_DEG,
     CONF_TILT_END,
     CONF_TILT_START,
+    DEFAULT_SHED_LIST,
     DEFAULTS,
     DOMAIN,
     FETCH_TIMEOUT_S,
+    LEARN_SAMPLE_INTERVAL,
     MOVE_REFETCH_KM,
     NUMBER_DEFAULTS,
     NUMBER_RESERVE,
@@ -46,11 +52,13 @@ from .const import (
     PLAN_INTERVAL,
     SCENARIO_BAD,
     SCENARIO_EXPECTED,
+    SHED_STORAGE_KEY,
     STORAGE_VERSION,
     WEATHER_MAX_AGE,
     WEATHER_STALE_AFTER,
 )
 from .core.battery import BatteryConfig, GeneratorConfig
+from .core.learn import Learner, Mode, Phase, apply_to_description
 from .core.loads import BaseLoad, Load, LoadModel, parse_load
 from .core.planner import Plan, PlannerConfig, make_plan
 from .core.pv import ArrayConfig, TiltPlan
@@ -93,16 +101,117 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
         self._cache: dict[str, Any] = {}
         self.numbers: dict[str, float] = dict(NUMBER_DEFAULTS)
+        self._shed_store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.{SHED_STORAGE_KEY}")
+        # Shed list, top = shed first: [{"uid", "summary", "description", "status"}]
+        self.shed_items: list[dict[str, Any]] = []
+        self.learner: Learner | None = None
+        self.learn_uid: str | None = None
+        self.learn_mode: Mode = Mode.STEP
+        self.learn_last_w: float | None = None
+        self._learn_unsub: CALLBACK_TYPE | None = None
+        self._shed_listeners: list[Callable[[], None]] = []
 
     def opt(self, key: str) -> Any:
         return self.config_entry.options.get(key, self.config_entry.data.get(key, DEFAULTS.get(key)))
 
     async def async_load_cache(self) -> None:
         self._cache = await self._store.async_load() or {}
+        stored = await self._shed_store.async_load()
+        if stored is None:
+            self.shed_items = [{"uid": uuid.uuid4().hex, "summary": name, "description": desc,
+                                "status": "needs_action"} for name, desc in DEFAULT_SHED_LIST]
+            await self._shed_store.async_save({"items": self.shed_items})
+        else:
+            self.shed_items = stored.get("items", [])
+
+    # --- shed list ---------------------------------------------------------------
+
+    @callback
+    def async_add_shed_listener(self, update: Callable[[], None]) -> CALLBACK_TYPE:
+        self._shed_listeners.append(update)
+        return lambda: self._shed_listeners.remove(update)
+
+    @callback
+    def _notify_ui(self) -> None:
+        """Update the shed list and learning entities only (not every planner sensor)."""
+        for update in list(self._shed_listeners):
+            update()
+
+    async def async_save_shed_list(self) -> None:
+        await self._shed_store.async_save({"items": self.shed_items})
+        self._notify_ui()
+        await self.async_refresh()  # edits are rare: replan now rather than after the debounce
+
+    def shed_item(self, uid: str | None) -> dict[str, Any] | None:
+        return next((i for i in self.shed_items if i["uid"] == uid), None)
+
+    # --- learning ------------------------------------------------------------------
+
+    def _load_power_w(self) -> float | None:
+        """Instant load power from the battery (and PV) sensors: load = PV − battery charge power."""
+        def num(entity_id):
+            state = self.hass.states.get(entity_id) if entity_id else None
+            try:
+                return float(state.state) if state else None
+            except ValueError:
+                return None
+
+        battery = num(self.opt(CONF_BATTERY_POWER))
+        if battery is None:
+            return None
+        pv = num(self.opt(CONF_PV_POWER)) if self.opt(CONF_PV_POWER) else 0.0
+        return None if pv is None else pv - battery
+
+    @callback
+    def async_learn_start(self) -> None:
+        self.async_learn_cancel()
+        if not self.opt(CONF_BATTERY_POWER):
+            self.learner = Learner(self.learn_mode)
+            self.learner.phase, self.learner.message = Phase.FAILED, "Set a battery power sensor in the options."
+        elif self.shed_item(self.learn_uid) is None:
+            self.learner = Learner(self.learn_mode)
+            self.learner.phase, self.learner.message = Phase.FAILED, "Choose which load to learn first."
+        else:
+            self.learner = Learner(self.learn_mode)
+            self._learn_unsub = async_track_time_interval(self.hass, self._async_learn_sample, LEARN_SAMPLE_INTERVAL)
+        self._notify_ui()
+
+    @callback
+    def async_learn_cancel(self) -> None:
+        if self._learn_unsub:
+            self._learn_unsub()
+            self._learn_unsub = None
+
+    async def _async_learn_sample(self, now: datetime) -> None:
+        learner = self.learner
+        if learner is None:
+            return
+        load_w = self._load_power_w()
+        if load_w is not None:
+            self.learn_last_w = load_w
+            learner.feed(now, load_w)
+        await self._async_learn_after_step()
+
+    async def async_learn_finish(self) -> None:
+        if self.learner is None:
+            return
+        self.learner.finish()
+        await self._async_learn_after_step()
+
+    async def _async_learn_after_step(self) -> None:
+        learner = self.learner
+        if learner.phase in (Phase.DONE, Phase.FAILED):
+            self.async_learn_cancel()
+            item = self.shed_item(self.learn_uid)
+            if learner.phase == Phase.DONE and item is not None and learner.result.watts > 0:
+                item["description"] = apply_to_description(item.get("description"), learner.result.watts)
+                await self.async_save_shed_list()
+        self._notify_ui()
 
     async def async_set_number(self, key: str, value: float) -> None:
         self.numbers[key] = value
-        await self.async_request_refresh()
+        await self.async_refresh()
 
     # --- weather ---------------------------------------------------------------
 
@@ -148,18 +257,10 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         except ValueError as err:
             raise UpdateFailed(f"{entity_id} is not numeric: {state.state}") from err
 
-    async def _loads(self) -> list[Load]:
-        entity_id = self.opt(CONF_LOADS_TODO)
-        if not entity_id or self.hass.states.get(entity_id) is None:
-            return []
-        resp = await self.hass.services.async_call(
-            "todo", "get_items", {"entity_id": entity_id, "status": ["needs_action", "completed"]},
-            blocking=True, return_response=True)
-        items = (resp or {}).get(entity_id, {}).get("items", [])
+    def _loads(self) -> list[Load]:
         loads = []
-        for item in items:
-            load = parse_load(item.get("summary", ""), item.get("description"),
-                              item.get("status") == "completed")
+        for item in self.shed_items:
+            load = parse_load(item.get("summary", ""), item.get("description"), item.get("status") == "completed")
             if load is None:
                 _LOGGER.debug("Shed list item without wattage ignored: %s", item.get("summary"))
             else:
@@ -175,7 +276,7 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         if not self._cache.get("forecast"):
             raise UpdateFailed("No forecast yet (never online since setup)")
         soc = self._soc()
-        loads = await self._loads()
+        loads = self._loads()
         now = dt_util.utcnow()
 
         scenarios = {SCENARIO_EXPECTED: parse_forecast(self._cache["forecast"])}
