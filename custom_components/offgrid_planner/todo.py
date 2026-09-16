@@ -1,4 +1,4 @@
-"""The shed order as an editable to-do list: top item is shed first, drag to reprioritise."""
+"""Loads and shed steps as editable to-do lists. Shed steps: top is applied first, drag to reprioritise."""
 from __future__ import annotations
 
 import uuid
@@ -14,10 +14,12 @@ from .entity import OffgridEntity
 
 async def async_setup_entry(hass: HomeAssistant, entry: OffgridConfigEntry,
                             async_add_entities: AddConfigEntryEntitiesCallback) -> None:
-    async_add_entities([ShedListEntity(entry.runtime_data)])
+    coordinator = entry.runtime_data
+    async_add_entities([PlannerListEntity(coordinator, "loads", "load_items"),
+                        PlannerListEntity(coordinator, "shed_order", "step_items")])
 
 
-class ShedListEntity(OffgridEntity, TodoListEntity):
+class PlannerListEntity(OffgridEntity, TodoListEntity):
     _attr_supported_features = (
         TodoListEntityFeature.CREATE_TODO_ITEM
         | TodoListEntityFeature.UPDATE_TODO_ITEM
@@ -26,8 +28,13 @@ class ShedListEntity(OffgridEntity, TodoListEntity):
         | TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
     )
 
-    def __init__(self, coordinator: OffgridCoordinator) -> None:
-        super().__init__(coordinator, "shed_order")
+    def __init__(self, coordinator: OffgridCoordinator, key: str, attr: str) -> None:
+        super().__init__(coordinator, key)
+        self._list_attr = attr
+
+    @property
+    def _items(self) -> list[dict]:
+        return getattr(self.coordinator, self._list_attr)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -41,34 +48,34 @@ class ShedListEntity(OffgridEntity, TodoListEntity):
     def todo_items(self) -> list[TodoItem]:
         return [TodoItem(uid=i["uid"], summary=i["summary"], description=i.get("description"),
                          status=TodoItemStatus(i.get("status", "needs_action")))
-                for i in self.coordinator.shed_items]
+                for i in self._items]
 
     def _index(self, uid: str) -> int:
-        for n, item in enumerate(self.coordinator.shed_items):
+        for n, item in enumerate(self._items):
             if item["uid"] == uid:
                 return n
         raise ServiceValidationError(f"No shed list item {uid}")
 
     async def async_create_todo_item(self, item: TodoItem) -> None:
-        self.coordinator.shed_items.append({
+        self._items.append({
             "uid": uuid.uuid4().hex, "summary": item.summary or "", "description": item.description,
             "status": str(item.status or TodoItemStatus.NEEDS_ACTION)})
-        await self.coordinator.async_save_shed_list()
+        await self.coordinator.async_save_lists()
 
     async def async_update_todo_item(self, item: TodoItem) -> None:
-        stored = self.coordinator.shed_items[self._index(item.uid)]
+        stored = self._items[self._index(item.uid)]
         stored.update(summary=item.summary or stored["summary"], description=item.description,
                       status=str(item.status or TodoItemStatus.NEEDS_ACTION))
-        await self.coordinator.async_save_shed_list()
+        await self.coordinator.async_save_lists()
 
     async def async_delete_todo_items(self, uids: list[str]) -> None:
-        items = self.coordinator.shed_items
+        items = self._items
         items[:] = [i for i in items if i["uid"] not in set(uids)]
-        await self.coordinator.async_save_shed_list()
+        await self.coordinator.async_save_lists()
 
     async def async_move_todo_item(self, uid: str, previous_uid: str | None = None) -> None:
-        items = self.coordinator.shed_items
+        items = self._items
         moved = items.pop(self._index(uid))
         position = 0 if previous_uid is None else self._index(previous_uid) + 1
         items.insert(position, moved)
-        await self.coordinator.async_save_shed_list()
+        await self.coordinator.async_save_lists()

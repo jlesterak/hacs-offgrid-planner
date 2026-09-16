@@ -2,8 +2,8 @@
 
 For each weather scenario (e.g. "expected" and "bad week"):
   1. Tilt: compare daytime-tilted vs flat PV over the next days, net of the jack's energy.
-  2. Shed: the smallest number of loads, in priority order, that keeps SOC above the reserve.
-  3. Generator: if shedding everything sheddable is not enough, simulate generator runs.
+  2. Shed: the smallest number of shed steps, in order, that keeps SOC above the reserve.
+  3. Generator: if applying every step is not enough, simulate generator runs.
 The overall status comes from the planning scenario (the pessimistic one when available).
 """
 from __future__ import annotations
@@ -46,9 +46,10 @@ class ScenarioPlan:
     tilt_gain_wh_per_day: float
     tilt_recommended: bool
     no_action: SimResult
-    shed_level: int | None  # None: shedding alone is not enough
-    shed_loads: list[str]
+    shed_level: int | None  # steps applied; None: shedding alone is not enough
+    shed_steps: list[str]  # labels of the applied steps (all active steps when the generator is needed)
     shed_saving_wh_per_day: float
+    step_effects: list[dict]  # per applied step: saved_wh_per_day, also_cuts
     with_plan: SimResult  # the chosen tilt/shed/generator plan
     generator_needed: bool
     status: Status
@@ -133,9 +134,10 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
     pv = tilted if tilt_ok else flat
 
     no_action = simulate(periods, soc_now, flat, base_load, battery, reserve)
+    steps = loads.active_steps()
 
     shed_level, chosen = None, None
-    for level in range(len(loads.sheddable()) + 1):
+    for level in range(len(steps) + 1):
         res = simulate(periods, soc_now, pv, loads.series(periods, level) if level else base_load,
                        battery, reserve)
         if res.min_soc >= reserve:
@@ -143,14 +145,17 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
             break
 
     generator_needed = shed_level is None
+    applied = len(steps) if generator_needed else shed_level
     if generator_needed:
-        plan_load = loads.series(periods, len(loads.sheddable()))
+        plan_load = loads.series(periods, applied)
         chosen = _generator_plan(periods, soc_now, pv, plan_load, battery, reserve, generator)
     else:
-        plan_load = loads.series(periods, shed_level) if shed_level else base_load
-    shed_names = [ld.name for ld in loads.sheddable()[: shed_level if shed_level is not None
-                                                         else len(loads.sheddable())]]
-    saving = sum(loads.daily_wh(ld) for ld in loads.sheddable() if ld.name in shed_names)
+        plan_load = loads.series(periods, applied) if applied else base_load
+    horizon_days = max(sum(p.hours for p in periods) / 24, 1 / 24)
+    saving = (sum(w * p.hours for p, w in zip(periods, base_load, strict=True))
+              - sum(w * p.hours for p, w in zip(periods, plan_load, strict=True))) / horizon_days
+    effects = [{"step": e["step"], "saved_wh_per_day": round(e["saved_wh"] / horizon_days),
+                "also_cuts": e["also_cuts"]} for e in loads.step_effects(periods, applied)]
 
     if generator_needed:
         status = Status.GENERATOR
@@ -176,8 +181,9 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
         tilt_recommended=tilt_ok,
         no_action=no_action,
         shed_level=shed_level,
-        shed_loads=shed_names,
+        shed_steps=[st.label for st in steps[:applied]],
         shed_saving_wh_per_day=saving,
+        step_effects=effects,
         with_plan=chosen,
         generator_needed=generator_needed,
         status=status,

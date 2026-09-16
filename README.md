@@ -16,14 +16,19 @@ This one assumes it isn't.
   Fetched hourly when online and cached, so planning continues offline.
 - PV: plane-of-array irradiance for flat or tilted panels, a measured low-sun factor for flat roof arrays,
   a per-site horizon factor (open desert < 1 < trees/canyon), temperature derating.
-- Loads: an always-on base (baseline, fridge, heating vs outdoor temperature) plus the **Shed order** to-do
-  list the integration creates (seeded with examples). Add, edit, delete, check off and drag to reprioritise
-  in the To-do panel; the plan updates immediately. Item description format:
-  `1200 W, 0.3 h/day, 7-10, weekdays` · add `essential` to never shed · `DC` for loads that bypass the
-  inverter · check an item off when the load isn't in use.
+- Loads: an always-on base (baseline, fridge, heating vs outdoor temperature) plus two editable to-do lists
+  the integration creates (seeded with examples); the plan updates immediately on any edit.
+  - **Loads**: what runs and when. `40 W, 24/7, needs inverter` · `1200 W, 0.3 h/day in 7-10` ·
+    `60 W, 8-17 weekdays, 10-22 weekends` · `35 W idle, 24/7, supply` (the inverter: loads that need it only run
+    while it is on) · `DC` = doesn't need the inverter · `essential` = never shed · check an item off when unused.
+  - **Shed steps**: ordered cutbacks, top first, drag to reorder. Each step cuts one load to a schedule:
+    `NAS: 18-22`, `Starlink + router: 8-17 weekdays, off weekends`, `Inverter: off`. Steps apply cumulatively;
+    the most restrictive schedule for a load wins, and cutting the inverter also stops the AC loads that need
+    it (the advice lists what else each step cuts and how much it saves).
+  - Items the planner can't parse are listed in the Status `problems` attribute.
 - **Learn a load**: pick it in *Load to learn*, press *Start learning*, keep it off for ~20 s, switch it on
   when *Learning* says so, then off again (or press *Finish learning* in *Average over cycles* mode for
-  cycling loads such as an ice maker). The measured battery-side watts replace the estimate in the item.
+  cycling loads such as an ice maker). The measured battery-side watts replace the estimate in the Loads item.
   Needs a fast battery power sensor (a shunt at ~1 Hz). By day, add a solar power sensor or learn with
   steady sun; a full battery hides load changes.
 - Battery: 7-day hourly SOC simulation with curtailment when full, then a search for the smallest shed level

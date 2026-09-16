@@ -60,8 +60,29 @@ SHED_STORAGE_KEY = "shed_list"
 LEARN_SAMPLE_INTERVAL = timedelta(seconds=1)
 METER_SAMPLE_INTERVAL = timedelta(seconds=5)
 
-# Seeded once when the integration is added; edit freely in the to-do list.
-DEFAULT_SHED_LIST = (
+# Seeded once when the integration is added; edit freely in the to-do lists.
+DEFAULT_LOADS = (
+    ("Inverter", "35 W idle, 24/7, supply (estimate)"),
+    ("Starlink + router", "60 W, 24/7, needs inverter (estimate)"),
+    ("NAS", "40 W, 24/7, needs inverter (estimate)"),
+    ("Espresso machine", "1200 W, 0.3 h/day in 7-10, needs inverter (estimate)"),
+    ("Small dishwasher", "900 W, 1 h/day in 12-15, needs inverter (estimate)"),
+    ("Ice maker", "120 W, 6 h/day in 10-18, needs inverter (estimate)"),
+)
+DEFAULT_STEPS = (
+    ("Espresso machine → off", "Espresso machine: off"),
+    ("Small dishwasher → off", "Small dishwasher: off"),
+    ("Ice maker → off", "Ice maker: off"),
+    ("NAS → evenings only", "NAS: 18-22"),
+    ("Internet → 8-22", "Starlink + router: 8-22"),
+    ("Inverter → 8-22", "Inverter: 8-22"),
+    ("NAS → off", "NAS: off"),
+    ("Internet → weekday work hours", "Starlink + router: 8-17 weekdays, off weekends"),
+    ("Inverter → 8-17", "Inverter: 8-17"),
+    ("Inverter → off", "Inverter: off"),
+)
+# The 0.1/0.2 single shed list seed, used to detect an unedited list worth replacing on upgrade.
+LEGACY_SHED_LIST = (
     ("Espresso machine", "1200 W, 0.3 h/day, 7-10 (estimate)"),
     ("Small dishwasher", "900 W, 1 h/day, 12-15 (estimate)"),
     ("Ice maker", "120 W, 6 h/day, 10-18 (estimate)"),

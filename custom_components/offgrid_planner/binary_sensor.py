@@ -25,7 +25,7 @@ def _planning(d: PlannerData):
 BINARY_SENSORS = (
     PlannerBinaryDescription(key="tilt_recommended",
                              value=lambda d: d.plan.scenarios[SCENARIO_EXPECTED].tilt_recommended),
-    PlannerBinaryDescription(key="shed_needed", value=lambda d: bool(_planning(d).shed_loads)),
+    PlannerBinaryDescription(key="shed_needed", value=lambda d: bool(_planning(d).shed_steps)),
     PlannerBinaryDescription(key="generator_needed", value=lambda d: _planning(d).generator_needed),
 )
 

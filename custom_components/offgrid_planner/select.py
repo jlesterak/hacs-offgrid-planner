@@ -1,4 +1,4 @@
-"""Choose which shed-list load to learn, and how."""
+"""Choose which load to learn, and how."""
 from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
@@ -32,15 +32,15 @@ class LearnLoadSelect(_LearnSelect):
 
     @property
     def options(self) -> list[str]:
-        return [i["summary"] for i in self.coordinator.shed_items] or ["(shed list is empty)"]
+        return [i["summary"] for i in self.coordinator.load_items] or ["(no loads)"]
 
     @property
     def current_option(self) -> str | None:
-        item = self.coordinator.shed_item(self.coordinator.learn_uid)
+        item = self.coordinator.load_item(self.coordinator.learn_uid)
         return item["summary"] if item else None
 
     async def async_select_option(self, option: str) -> None:
-        item = next((i for i in self.coordinator.shed_items if i["summary"] == option), None)
+        item = next((i for i in self.coordinator.load_items if i["summary"] == option), None)
         self.coordinator.learn_uid = item["uid"] if item else None
         self.async_write_ha_state()
 

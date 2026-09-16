@@ -40,11 +40,13 @@ from .const import (
     CONF_TILT_DEG,
     CONF_TILT_END,
     CONF_TILT_START,
-    DEFAULT_SHED_LIST,
+    DEFAULT_LOADS,
+    DEFAULT_STEPS,
     DEFAULTS,
     DOMAIN,
     FETCH_TIMEOUT_S,
     LEARN_SAMPLE_INTERVAL,
+    LEGACY_SHED_LIST,
     METER_SAMPLE_INTERVAL,
     MOVE_REFETCH_KM,
     NUMBER_DEFAULTS,
@@ -61,7 +63,7 @@ from .const import (
 from .core.battery import BatteryConfig, GeneratorConfig
 from .core.learn import Learner, Mode, Phase, apply_to_description
 from .core.loadcheck import EnergyMeter, LoadCheck, hour_key, last_night
-from .core.loads import BaseLoad, Load, LoadModel, parse_load
+from .core.loads import BaseLoad, Load, LoadModel, ShedStep, parse_load, parse_step
 from .core.planner import DaySummary, Plan, PlannerConfig, daily_summary, make_plan
 from .core.pv import ArrayConfig, TiltPlan
 from .core.weather import (
@@ -88,6 +90,16 @@ class PlannerData:
     loads: list[Load]
     daily: dict[str, list[DaySummary]]
     load_check: LoadCheck | None
+    problems: list[str]
+
+
+def _item(summary: str, description: str) -> dict[str, Any]:
+    return {"uid": uuid.uuid4().hex, "summary": summary, "description": description, "status": "needs_action"}
+
+
+def _is_legacy_seed(items: list[dict[str, Any]]) -> bool:
+    return [(i.get("summary"), i.get("description"), i.get("status")) for i in items] == [
+        (name, desc, "needs_action") for name, desc in LEGACY_SHED_LIST]
 
 
 def _km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -107,8 +119,9 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         self.numbers: dict[str, float] = dict(NUMBER_DEFAULTS)
         self._shed_store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.{SHED_STORAGE_KEY}")
-        # Shed list, top = shed first: [{"uid", "summary", "description", "status"}]
-        self.shed_items: list[dict[str, Any]] = []
+        # To-do style items {"uid", "summary", "description", "status"}: loads, and shed steps (top = first).
+        self.load_items: list[dict[str, Any]] = []
+        self.step_items: list[dict[str, Any]] = []
         self.learner: Learner | None = None
         self.learn_uid: str | None = None
         self.learn_mode: Mode = Mode.STEP
@@ -127,12 +140,17 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         if meter:
             self.meter.hours = meter.get("hours", {})
         stored = await self._shed_store.async_load()
-        if stored is None:
-            self.shed_items = [{"uid": uuid.uuid4().hex, "summary": name, "description": desc,
-                                "status": "needs_action"} for name, desc in DEFAULT_SHED_LIST]
-            await self._shed_store.async_save({"items": self.shed_items})
+        if stored is not None and "loads" in stored:
+            self.load_items, self.step_items = stored["loads"], stored.get("steps", [])
+            return
+        if stored is None or _is_legacy_seed(stored.get("items", [])):
+            self.load_items = [_item(name, desc) for name, desc in DEFAULT_LOADS]
+            self.step_items = [_item(name, desc) for name, desc in DEFAULT_STEPS]
         else:
-            self.shed_items = stored.get("items", [])
+            # 0.1/0.2 edited single list: every item becomes a load, and a "→ off" step in the same order.
+            self.load_items = stored.get("items", [])
+            self.step_items = [_item(f"{i['summary']} → off", f"{i['summary']}: off") for i in self.load_items]
+        await self._shed_store.async_save(self._lists())
 
     # --- shed list ---------------------------------------------------------------
 
@@ -147,13 +165,16 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         for update in list(self._shed_listeners):
             update()
 
-    async def async_save_shed_list(self) -> None:
-        await self._shed_store.async_save({"items": self.shed_items})
+    def _lists(self) -> dict[str, Any]:
+        return {"loads": self.load_items, "steps": self.step_items}
+
+    async def async_save_lists(self) -> None:
+        await self._shed_store.async_save(self._lists())
         self._notify_ui()
         await self.async_refresh()  # edits are rare: replan now rather than after the debounce
 
-    def shed_item(self, uid: str | None) -> dict[str, Any] | None:
-        return next((i for i in self.shed_items if i["uid"] == uid), None)
+    def load_item(self, uid: str | None) -> dict[str, Any] | None:
+        return next((i for i in self.load_items if i["uid"] == uid), None)
 
     @callback
     def async_watch_soc(self) -> CALLBACK_TYPE:
@@ -209,7 +230,7 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         if not self.opt(CONF_BATTERY_POWER):
             self.learner = Learner(self.learn_mode)
             self.learner.phase, self.learner.message = Phase.FAILED, "Set a battery power sensor in the options."
-        elif self.shed_item(self.learn_uid) is None:
+        elif self.load_item(self.learn_uid) is None:
             self.learner = Learner(self.learn_mode)
             self.learner.phase, self.learner.message = Phase.FAILED, "Choose which load to learn first."
         else:
@@ -243,10 +264,10 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         learner = self.learner
         if learner.phase in (Phase.DONE, Phase.FAILED):
             self.async_learn_cancel()
-            item = self.shed_item(self.learn_uid)
+            item = self.load_item(self.learn_uid)
             if learner.phase == Phase.DONE and item is not None and learner.result.watts > 0:
                 item["description"] = apply_to_description(item.get("description"), learner.result.watts)
-                await self.async_save_shed_list()
+                await self.async_save_lists()
         self._notify_ui()
 
     async def async_set_number(self, key: str, value: float) -> None:
@@ -297,15 +318,22 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         except ValueError as err:
             raise UpdateFailed(f"{entity_id} is not numeric: {state.state}") from err
 
-    def _loads(self) -> list[Load]:
-        loads = []
-        for item in self.shed_items:
+    def _loads(self) -> tuple[list[Load], list[ShedStep], list[str]]:
+        """Parse both lists. Unparseable items are reported as problems, not silently dropped."""
+        loads, steps, problems = [], [], []
+        for item in self.load_items:
             load = parse_load(item.get("summary", ""), item.get("description"), item.get("status") == "completed")
             if load is None:
-                _LOGGER.debug("Shed list item without wattage ignored: %s", item.get("summary"))
+                problems.append(f"Load '{item.get('summary')}': no wattage (e.g. '40 W, 24/7')")
             else:
                 loads.append(load)
-        return loads
+        for item in self.step_items:
+            step = parse_step(item.get("summary", ""), item.get("description"), item.get("status") == "completed")
+            if step is None:
+                problems.append(f"Shed step '{item.get('summary')}': use 'Load name: schedule' (e.g. 'NAS: 18-22')")
+            else:
+                steps.append(step)
+        return loads, steps, problems
 
     # --- plan ------------------------------------------------------------------
 
@@ -316,7 +344,7 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         if not self._cache.get("forecast"):
             raise UpdateFailed("No forecast yet (never online since setup)")
         soc = self._soc()
-        loads = self._loads()
+        loads, steps, problems = self._loads()
         now = dt_util.utcnow()
 
         scenarios = {SCENARIO_EXPECTED: parse_forecast(self._cache["forecast"])}
@@ -329,7 +357,8 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         load_model = LoadModel(
             BaseLoad(baseline_w=float(self.opt(CONF_BASELINE_W)), fridge_w=float(self.opt(CONF_FRIDGE_W)),
                      heat_w_per_degc=float(self.opt(CONF_HEAT_W_PER_DEGC))),
-            tuple(loads), tz=tz)
+            tuple(loads), tuple(steps), tz=tz)
+        problems += load_model.problems()
         generator = (GeneratorConfig(charge_w=float(self.opt(CONF_GEN_CHARGE_W)),
                                      allowed_start_hour=float(self.opt(CONF_GEN_START)),
                                      allowed_end_hour=float(self.opt(CONF_GEN_END)), tz=tz)
@@ -357,4 +386,4 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         fetched = dt_util.parse_datetime(self._cache["fetched"])
         return PlannerData(plan=plan, soc=soc, weather_fetched=fetched,
                            weather_stale=now - fetched > WEATHER_STALE_AFTER, loads=loads,
-                           daily=daily, load_check=check)
+                           daily=daily, load_check=check, problems=problems)

@@ -60,4 +60,4 @@ def test_apply_to_description(before, after):
 
 
 def test_measured_watts_are_battery_side():
-    assert parse_load("Espresso", "1187 W measured, 0.3 h/day").ac is False
+    assert parse_load("Espresso", "1187 W measured, 0.3 h/day").battery_side is True

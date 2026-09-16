@@ -3,7 +3,7 @@ import datetime as dt
 import pytest
 from core.battery import BatteryConfig, GeneratorConfig
 from core.loadcheck import EnergyMeter, hour_key, last_night
-from core.loads import BaseLoad, Load, LoadModel
+from core.loads import BaseLoad, LoadModel, parse_load, parse_step
 from core.planner import PlannerConfig, daily_summary, make_plan
 from core.pv import ArrayConfig, TiltPlan
 from core.solar import position
@@ -28,7 +28,8 @@ def _clear(start, days, sky=1.0):
 def test_daily_summary_matches_hourly_series():
     now = dt.datetime(2026, 12, 14, 15, tzinfo=UTC)
     wx = _clear(now - dt.timedelta(hours=15), 8, sky=0.05)
-    loads = LoadModel(BaseLoad(heat_w_per_degc=0), (Load("Espresso", 1200, 0.3, (7, 10)),), tz=TZ)
+    loads = LoadModel(BaseLoad(heat_w_per_degc=0), (parse_load("Espresso", "1200 W, 0.3 h/day in 7-10"),),
+                      (parse_step("Espresso → off", "Espresso: off"),), tz=TZ)
     plan = make_plan({"bad": wx}, now, 35, *YUMA, ArrayConfig(), BatteryConfig(), loads, GeneratorConfig(tz=TZ),
                      PlannerConfig(tilt=TiltPlan(tilt_deg=10, tz=TZ)))
     sc = plan.scenarios["bad"]

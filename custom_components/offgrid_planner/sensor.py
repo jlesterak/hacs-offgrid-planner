@@ -55,16 +55,25 @@ def _week(d: PlannerData) -> list[dict[str, Any]]:
     return rows
 
 
+def _steps_text(sc: ScenarioPlan) -> str:
+    parts = []
+    for e in sc.step_effects:
+        also = f" (also cuts {', '.join(e['also_cuts'])})" if e["also_cuts"] else ""
+        parts.append(f"{e['step']}{also}")
+    return "; ".join(parts)
+
+
 def _advice(d: PlannerData) -> str:
     sc = _planning(d)
     if sc.status == Status.GENERATOR:
         r = sc.with_plan
         when = r.generator_first_start.isoformat() if r.generator_first_start else "soon"
         return (f"Generator needed: first run {when}, about {r.generator_hours:.0f} h and "
-                f"{r.fuel_l:.1f} L over the next week, with {', '.join(sc.shed_loads) or 'nothing'} off.")
+                f"{r.fuel_l:.1f} L over the next week, even with every shed step applied.")
     if sc.status == Status.SHED:
-        return (f"Shed {', '.join(sc.shed_loads)} (saves ~{sc.shed_saving_wh_per_day:.0f} Wh/day) "
-                f"to stay above the reserve.")
+        n = len(sc.shed_steps)
+        return (f"Apply shed step{'s 1–' + str(n) if n > 1 else ' 1'}: {_steps_text(sc)}. "
+                f"Saves ~{sc.shed_saving_wh_per_day:.0f} Wh/day and keeps the battery above the reserve.")
     if sc.status == Status.TILT:
         return f"Tilt the trailer by day: ~{sc.tilt_gain_wh_per_day:.0f} Wh/day more solar."
     return "No action needed."
@@ -81,7 +90,9 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
         key="status", device_class=SensorDeviceClass.ENUM, options=STATUS_OPTIONS,
         value=lambda d: d.plan.status.name.lower(),
         attrs=lambda d: {"advice": _advice(d), "week": _week(d), "planning_scenario": d.plan.planning_scenario,
-                         "shed_loads": _planning(d).shed_loads,
+                         "shed_steps": _planning(d).shed_steps,
+                         "step_effects": _planning(d).step_effects,
+                         "problems": d.problems,
                          "tilt_recommended": _expected(d).tilt_recommended,
                          "weather_stale": d.weather_stale}),
     PlannerSensorDescription(
@@ -174,7 +185,7 @@ class LearningSensor(OffgridEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         c = self.coordinator
         learner = c.learner
-        item = c.shed_item(c.learn_uid)
+        item = c.load_item(c.learn_uid)
         attrs: dict[str, Any] = {"load": item["summary"] if item else None, "mode": c.learn_mode.value,
                                  "load_power_now_w": None if c.learn_last_w is None else round(c.learn_last_w)}
         if learner:

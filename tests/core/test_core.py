@@ -3,7 +3,7 @@ import math
 
 import pytest
 from core.battery import BatteryConfig, GeneratorConfig, simulate
-from core.loads import BaseLoad, Load, LoadModel, parse_load
+from core.loads import BaseLoad, LoadModel, parse_load, parse_step
 from core.planner import PlannerConfig, Status, make_plan
 from core.pv import ArrayConfig, TiltPlan, low_sun_factor, pv_series
 from core.solar import erbs_split, position
@@ -76,35 +76,93 @@ def test_clear_december_day_matches_analysis():
 # --- loads -----------------------------------------------------------------
 
 def test_parse_load_variants():
-    ld = parse_load("Espresso", "1200 W, 0.3 h/day, 7-10, weekdays")
-    assert (ld.watts, ld.hours_per_day, ld.window, ld.days, ld.ac) == (1200, 0.3, (7, 10), "weekdays", True)
-    star = parse_load("Starlink", "60W 9h 8:00-17:00 weekdays DC")
-    assert star.window == (8, 17) and not star.ac and star.hours_per_day == 9
-    fridge = parse_load("Pi", "6 W essential dc")
-    assert fridge.essential and fridge.hours_per_day == 24
+    ld = parse_load("Espresso", "1200 W, 0.3 h/day in 7-10, weekdays, needs inverter")
+    assert (ld.watts, ld.hours_per_day, ld.needs_inverter) == (1200, 0.3, True)
+    assert ld.schedule.describe() == "7-10 weekdays"
+    star = parse_load("Starlink", "60W 8:00-17:00 weekdays DC")
+    assert star.schedule.describe() == "8-17 weekdays" and not star.needs_inverter
+    pi = parse_load("Pi", "6 W essential dc")
+    assert pi.essential and pi.schedule.describe() == "24/7"
+    inv = parse_load("Inverter", "35 W idle, 24/7, supply (estimate)")
+    assert inv.supply and not inv.needs_inverter
     assert parse_load("Mystery", "sometimes") is None
-    assert not parse_load("NAS", "40 W, 4 h, 18-22", completed=True).in_use
+    assert not parse_load("NAS", "40 W, 18-22", completed=True).in_use
+    assert parse_load("Espresso", "1180 W measured, 0.3 h/day in 7-10").battery_side
 
 
-def test_load_window_wraps_midnight_and_weekdays():
-    ld = Load("Heater", 100, hours_per_day=4, window=(22, 2), days="weekdays")
+def test_parse_step_forms():
+    st = parse_step("NAS → evenings", "NAS: 18-22")
+    assert st.load_name == "NAS" and st.schedule.describe() == "18-22"
+    assert parse_step("Inverter -> off", None).schedule.describe() == "off"
+    assert parse_step("Starlink → work hours", "Starlink: 8:30-17 weekdays, off weekends").schedule.describe() == \
+        "8:30-17 weekdays, off weekends"
+    assert parse_step("Just a note", None) is None
+    assert not parse_step("NAS → off", "NAS: off", completed=True).enabled
+
+
+def test_schedule_wraps_midnight_and_days():
+    sch = parse_step("x", "Heater: 22-2 weekdays").schedule
     mon_23 = dt.datetime(2026, 9, 14, 23, tzinfo=UTC)
     sat_23 = dt.datetime(2026, 9, 19, 23, tzinfo=UTC)
-    assert ld.active(mon_23) and not ld.active(sat_23)
-    assert ld.mean_w(mon_23, 1.0) == pytest.approx(100)  # 4 h in a 4 h window
+    assert sch.active(mon_23) and not sch.active(sat_23)
 
 
-def test_shed_order_follows_priority():
-    wx = week(dt.datetime(2026, 9, 14, 7, tzinfo=UTC), *YUMA, days=1)
-    loads = LoadModel(BaseLoad(heat_w_per_degc=0), (
-        Load("Espresso", 1200, 0.5, (7, 9)),
-        Load("Router", 10, essential=True, ac=False),
-        Load("NAS", 40, 4, (18, 22)),
-    ), tz=TZ, inverter_efficiency=1.0)
-    assert [ld.name for ld in loads.sheddable()] == ["Espresso", "NAS"]
-    full, shed1 = sum(loads.series(wx)), sum(loads.series(wx, 1))
-    assert full - shed1 == pytest.approx(600)
-    assert loads.daily_wh(loads.loads[2]) == pytest.approx(160)
+def _trailer(**kw):
+    loads = (
+        parse_load("Inverter", "35 W idle, 24/7, supply"),
+        parse_load("NAS", "40 W, 24/7"),
+        parse_load("Starlink", "60 W, 24/7"),
+        parse_load("Espresso", "1200 W, 0.5 h/day in 7-9"),
+        parse_load("Router", "10 W, 24/7, DC, essential"),
+    )
+    steps = tuple(parse_step(lbl, desc) for lbl, desc in (
+        ("Espresso → off", "Espresso: off"),
+        ("NAS → evenings", "NAS: 18-22"),
+        ("Inverter → 8-22", "Inverter: 8-22"),
+        ("Router → off", "Router: off"),  # essential: never applied
+        ("NAS → off", "NAS: off"),
+        ("Inverter → off", "Inverter: off"),
+    ))
+    return LoadModel(BaseLoad(baseline_w=0, fridge_w=0, heat_w_per_degc=0), loads, steps, tz="UTC",
+                     inverter_efficiency=1.0, **kw)
+
+
+def test_steps_apply_in_order_and_skip_essential():
+    lm = _trailer()
+    assert [st.label for st in lm.active_steps()] == [
+        "Espresso → off", "NAS → evenings", "Inverter → 8-22", "NAS → off", "Inverter → off"]
+    day = [WeatherPeriod(dt.datetime(2026, 9, 14, h, tzinfo=UTC), 1.0, 0, 10.0) for h in range(24)]
+    wh = [sum(lm.series(day, level)) for level in range(6)]
+    # level 0: inverter 35×24 + NAS 40×24 + Starlink 60×24 + espresso 600 + router 240
+    assert wh[0] == pytest.approx(840 + 960 + 1440 + 600 + 240)
+    assert wh[1] == pytest.approx(wh[0] - 600)
+    assert wh[2] == pytest.approx(wh[1] - 40 * 20)  # NAS only 18-22
+    # Inverter 8-22 also stops Starlink 22-08 (10 h) and saves its own idle 10 h; NAS already within 18-22.
+    assert wh[3] == pytest.approx(wh[2] - 35 * 10 - 60 * 10)
+    assert wh[5] == pytest.approx(240)  # only the DC essential router is left
+
+
+def test_most_restrictive_step_wins_regardless_of_order():
+    lm = _trailer()
+    reordered = LoadModel(lm.base, lm.loads, (parse_step("NAS → off", "NAS: off"),
+                                              parse_step("NAS → evenings", "NAS: 18-22")), tz="UTC")
+    evening = dt.datetime(2026, 9, 14, 19, tzinfo=UTC)
+    assert "NAS" not in reordered.power_w(evening, 10.0, level=2)[1]
+
+
+def test_step_effects_report_dependent_loads():
+    lm = _trailer()
+    day = [WeatherPeriod(dt.datetime(2026, 9, 14, h, tzinfo=UTC), 1.0, 0, 10.0) for h in range(24)]
+    effects = lm.step_effects(day, 3)
+    assert effects[2]["step"] == "Inverter → 8-22"
+    assert effects[2]["also_cuts"] == ["Starlink"]
+    assert effects[2]["saved_wh"] == pytest.approx(35 * 10 + 60 * 10)
+
+
+def test_problems_flag_unknown_load():
+    lm = LoadModel(BaseLoad(), (parse_load("NAS", "40 W"),), (parse_step("Ghost → off", "Ghost: off"),))
+    assert lm.problems() == ["Shed step 'Ghost → off': no load named 'Ghost'"]
+    assert lm.active_steps() == []
 
 
 # --- battery ---------------------------------------------------------------
@@ -178,13 +236,15 @@ def test_pessimistic_scales_main_forecast_by_ensemble_spread():
 # --- planner ---------------------------------------------------------------
 
 def _loads():
-    return LoadModel(BaseLoad(heat_w_per_degc=0), (
-        Load("Espresso machine", 1200, 0.3, (7, 10)),
-        Load("Dishwasher", 900, 1, (12, 15)),
-        Load("Ice maker", 120, 6, (10, 18)),
-        Load("NAS", 40, 4, (18, 22)),
-        Load("Starlink + router", 60, 9, (8, 17), days="weekdays", ac=False),
-    ), tz=TZ)
+    loads = (
+        parse_load("Espresso machine", "1200 W, 0.3 h/day in 7-10"),
+        parse_load("Dishwasher", "900 W, 1 h/day in 12-15"),
+        parse_load("Ice maker", "120 W, 6 h/day in 10-18"),
+        parse_load("NAS", "40 W, 18-22"),
+        parse_load("Starlink + router", "60 W, 8-17 weekdays, DC"),
+    )
+    steps = tuple(parse_step(f"{ld.name} → off", f"{ld.name}: off") for ld in loads)
+    return LoadModel(BaseLoad(heat_w_per_degc=0), loads, steps, tz=TZ)
 
 
 def _plan(sky, soc, month=9, loc=YUMA, temp=15.0):
@@ -207,7 +267,7 @@ def test_plan_gloomy_week_sheds_in_priority_order():
     sc = plan.scenarios["expected"]
     assert plan.status in (Status.SHED, Status.GENERATOR)
     if plan.status == Status.SHED:
-        assert sc.shed_loads[0] == "Espresso machine"
+        assert sc.shed_steps[0] == "Espresso machine → off"
         assert sc.with_plan.min_soc >= 20
 
 

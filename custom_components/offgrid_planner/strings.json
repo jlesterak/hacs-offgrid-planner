@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Off-Grid Planner",
-        "description": "Forecast-driven advice for tilting, shedding loads and running a generator. Location follows Home Assistant's home location. A shed-order to-do list is created with example loads: edit, reorder (top = shed first) or learn them.",
+        "description": "Forecast-driven advice for tilting, shedding loads and running a generator. Location follows Home Assistant's home location. Two to-do lists are created with examples: Loads (what runs and when) and Shed steps (ordered cutbacks, top first).",
         "data": {
           "soc_entity": "Battery state of charge",
           "battery_power_entity": "Battery power sensor (for learning loads)",
@@ -162,8 +162,11 @@
       }
     },
     "todo": {
+      "loads": {
+        "name": "Loads"
+      },
       "shed_order": {
-        "name": "Shed order"
+        "name": "Shed steps"
       }
     },
     "select": {
