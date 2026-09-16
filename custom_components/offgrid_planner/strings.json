@@ -1,0 +1,144 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Off-Grid Planner",
+        "description": "Forecast-driven advice for tilting, shedding loads and running a generator. Location follows Home Assistant's home location.",
+        "data": {
+          "soc_entity": "Battery state of charge",
+          "loads_todo": "Shed-order to-do list",
+          "capacity_wh": "Battery usable capacity",
+          "rated_w": "Solar array rated power",
+          "system_factor": "PV system factor",
+          "baseline_w": "Always-on baseline",
+          "fridge_w": "Fridge average",
+          "heat_w_per_degc": "Heating draw per °C below 15 °C",
+          "tilt_deg": "Daytime tilt",
+          "tilt_azimuth": "Tilt direction",
+          "tilt_start_hour": "Tilt from (local hour)",
+          "tilt_end_hour": "Level again at (local hour)",
+          "jack_wh_per_day": "Jack energy per day",
+          "generator": "Generator available",
+          "generator_charge_w": "Generator charging power into the battery",
+          "generator_start_hour": "Generator allowed from (local hour)",
+          "generator_end_hour": "Generator allowed until (local hour)",
+          "use_ensemble": "Plan for a bad week (ensemble forecast)"
+        },
+        "data_description": {
+          "soc_entity": "Battery SOC sensor (%), ideally from a shunt.",
+          "loads_todo": "Top item is shed first. Description: e.g. '1200 W, 0.3 h/day, 7-10, weekdays'. Add 'essential' to never shed, 'DC' for loads that bypass the inverter. Check an item off when the load is not in use.",
+          "system_factor": "Measured output ÷ rated output at high sun (0.68 for a flat roof array).",
+          "baseline_w": "Average battery draw of everything not on the shed list, excluding fridge and heat.",
+          "heat_w_per_degc": "Furnace blower average watts per °C of outdoor temperature below 15 °C.",
+          "tilt_deg": "How far the trailer can be tilted by day (0 = never).",
+          "tilt_azimuth": "Compass direction the panels face when tilted (180 = south).",
+          "jack_wh_per_day": "Energy to raise and lower the tongue jack once.",
+          "use_ensemble": "Also downloads an ensemble forecast and plans against its darkest 10%."
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Off-Grid Planner",
+        "data": {
+          "soc_entity": "Battery state of charge",
+          "loads_todo": "Shed-order to-do list",
+          "capacity_wh": "Battery usable capacity",
+          "rated_w": "Solar array rated power",
+          "system_factor": "PV system factor",
+          "baseline_w": "Always-on baseline",
+          "fridge_w": "Fridge average",
+          "heat_w_per_degc": "Heating draw per °C below 15 °C",
+          "tilt_deg": "Daytime tilt",
+          "tilt_azimuth": "Tilt direction",
+          "tilt_start_hour": "Tilt from (local hour)",
+          "tilt_end_hour": "Level again at (local hour)",
+          "jack_wh_per_day": "Jack energy per day",
+          "generator": "Generator available",
+          "generator_charge_w": "Generator charging power into the battery",
+          "generator_start_hour": "Generator allowed from (local hour)",
+          "generator_end_hour": "Generator allowed until (local hour)",
+          "use_ensemble": "Plan for a bad week (ensemble forecast)"
+        },
+        "data_description": {
+          "soc_entity": "Battery SOC sensor (%), ideally from a shunt.",
+          "loads_todo": "Top item is shed first. Description: e.g. '1200 W, 0.3 h/day, 7-10, weekdays'. Add 'essential' to never shed, 'DC' for loads that bypass the inverter. Check an item off when the load is not in use.",
+          "system_factor": "Measured output ÷ rated output at high sun (0.68 for a flat roof array).",
+          "baseline_w": "Average battery draw of everything not on the shed list, excluding fridge and heat.",
+          "heat_w_per_degc": "Furnace blower average watts per °C of outdoor temperature below 15 °C.",
+          "tilt_deg": "How far the trailer can be tilted by day (0 = never).",
+          "tilt_azimuth": "Compass direction the panels face when tilted (180 = south).",
+          "jack_wh_per_day": "Energy to raise and lower the tongue jack once.",
+          "use_ensemble": "Also downloads an ensemble forecast and plans against its darkest 10%."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "tilt": "Tilt the trailer",
+          "shed": "Shed loads",
+          "generator": "Generator needed"
+        }
+      },
+      "min_soc_expected": {
+        "name": "Lowest SOC next 7 days (expected)"
+      },
+      "min_soc_bad_week": {
+        "name": "Lowest SOC next 7 days (bad week)"
+      },
+      "reserve_reached": {
+        "name": "Reserve reached without action"
+      },
+      "pv_today": {
+        "name": "Solar today"
+      },
+      "pv_tomorrow": {
+        "name": "Solar tomorrow"
+      },
+      "tilt_gain": {
+        "name": "Tilt gain per day"
+      },
+      "shed_saving": {
+        "name": "Shed saving per day"
+      },
+      "generator_hours": {
+        "name": "Generator hours next 7 days"
+      },
+      "generator_first_run": {
+        "name": "Generator first run"
+      },
+      "generator_fuel": {
+        "name": "Generator fuel next 7 days"
+      },
+      "weather_updated": {
+        "name": "Forecast downloaded"
+      }
+    },
+    "binary_sensor": {
+      "tilt_recommended": {
+        "name": "Tilt recommended"
+      },
+      "shed_needed": {
+        "name": "Shedding needed"
+      },
+      "generator_needed": {
+        "name": "Generator needed"
+      }
+    },
+    "number": {
+      "reserve_soc": {
+        "name": "Reserve SOC"
+      },
+      "site_horizon": {
+        "name": "Site horizon factor"
+      }
+    }
+  }
+}

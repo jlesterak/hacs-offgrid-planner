@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -110,3 +110,33 @@ def percentile_member(members: dict[str, list[WeatherPeriod]], q: float,
     if not ranked:
         return []
     return ranked[min(len(ranked) - 1, max(0, round(q * (len(ranked) - 1))))]
+
+
+def pessimistic(expected: list[WeatherPeriod], members: dict[str, list[WeatherPeriod]], q: float = 0.1,
+                start: dt.datetime | None = None, hours: float | None = None) -> list[WeatherPeriod]:
+    """Scale the main forecast by the ensemble's spread instead of using ensemble radiation directly.
+
+    Ensemble models (e.g. GFS) can be biased brighter or darker than the best local model. So take the
+    member ranked at quantile q by total GHI, and per UTC day multiply the main forecast by
+    (that member's day total ÷ the median member's day total), capped at 1.
+    """
+    member = percentile_member(members, q, start, hours)
+    median = percentile_member(members, 0.5, start, hours)
+    if not member or not median:
+        return expected
+
+    def by_day(periods):
+        out: dict[dt.date, float] = {}
+        for p in periods:
+            out[p.start.date()] = out.get(p.start.date(), 0.0) + p.ghi * p.hours
+        return out
+
+    low, mid = by_day(member), by_day(median)
+    ratio = {d: min(1.0, low[d] / mid[d]) if mid.get(d) else 1.0 for d in low}
+    result = []
+    for p in expected:
+        r = ratio.get(p.start.date(), 1.0)
+        result.append(replace(p, ghi=p.ghi * r,
+                              beam_h=None if p.beam_h is None else p.beam_h * r,
+                              diffuse=None if p.diffuse is None else p.diffuse * r))
+    return result

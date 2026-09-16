@@ -7,7 +7,7 @@ from core.loads import BaseLoad, Load, LoadModel, parse_load
 from core.planner import PlannerConfig, Status, make_plan
 from core.pv import ArrayConfig, TiltPlan, low_sun_factor, pv_series
 from core.solar import erbs_split, position
-from core.weather import WeatherPeriod, parse_ensemble, parse_forecast, percentile_member
+from core.weather import WeatherPeriod, parse_ensemble, parse_forecast, percentile_member, pessimistic
 
 UTC = dt.UTC
 TZ = "America/Phoenix"
@@ -157,6 +157,22 @@ def test_ensemble_percentile_member_picks_whole_member():
     assert len(members) == 3
     assert percentile_member(members, 0.0)[0].ghi == 100
     assert percentile_member(members, 0.5)[0].ghi == 300
+
+
+def test_pessimistic_scales_main_forecast_by_ensemble_spread():
+    start = dt.datetime(2026, 9, 16, 0, tzinfo=UTC)
+    main = [WeatherPeriod(start + dt.timedelta(hours=h), 1.0, 500.0, 20.0, 400.0, 100.0) for h in range(48)]
+
+    def member(day1, day2):
+        return [WeatherPeriod(start + dt.timedelta(hours=h), 1.0, day1 if h < 24 else day2, 20.0) for h in range(48)]
+
+    # Ensemble is much brighter overall than the main model; only its relative spread should matter.
+    members = {"a": member(900, 900), "b": member(450, 900), "c": member(900, 300), "d": member(900, 900),
+               "e": member(900, 900)}
+    bad = pessimistic(main, members, q=0.0)
+    assert bad[0].ghi == pytest.approx(500)  # darkest member "c" is normal on day 1
+    assert bad[30].ghi == pytest.approx(500 * 300 / 900) and bad[30].beam_h == pytest.approx(400 / 3)
+    assert all(b.ghi <= m.ghi for b, m in zip(bad, main, strict=True))
 
 
 # --- planner ---------------------------------------------------------------

@@ -1,0 +1,13 @@
+{
+  "domain": "offgrid_planner",
+  "name": "Off-Grid Planner",
+  "after_dependencies": ["todo"],
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/jlesterak/offgrid-planner",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/jlesterak/offgrid-planner/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
