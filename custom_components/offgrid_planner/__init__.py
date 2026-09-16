@@ -17,6 +17,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OffgridConfigEntry) -> b
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     if unsub_meter := coordinator.async_start_meter():
         entry.async_on_unload(unsub_meter)
+    entry.async_on_unload(coordinator.async_watch_soc())
     await coordinator.async_refresh()
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True

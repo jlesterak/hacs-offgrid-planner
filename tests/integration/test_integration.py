@@ -249,3 +249,14 @@ async def test_load_model_check_from_metered_night(hass: HomeAssistant, env, aio
         async_fire_time_changed(hass)
         await hass.async_block_till_done()
     assert coordinator.meter.last_discharge_w == 45.0
+
+
+async def test_replans_when_soc_sensor_recovers(hass: HomeAssistant, env, aioclient_mock, freezer) -> None:
+    hass.states.async_set("sensor.battery_soc", "unavailable")
+    await _setup(hass, aioclient_mock)
+    assert hass.states.get("sensor.off_grid_planner_status").state == "unavailable"
+    hass.states.async_set("sensor.battery_soc", "64", {"device_class": "battery"})
+    freezer.tick(dt.timedelta(seconds=11))  # past the refresh debounce
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.off_grid_planner_status").state != "unavailable"

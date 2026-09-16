@@ -15,7 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -154,6 +154,19 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
 
     def shed_item(self, uid: str | None) -> dict[str, Any] | None:
         return next((i for i in self.shed_items if i["uid"] == uid), None)
+
+    @callback
+    def async_watch_soc(self) -> CALLBACK_TYPE:
+        """Replan as soon as the SOC sensor recovers, e.g. a BLE shunt that reports a few seconds after startup."""
+
+        @callback
+        def _changed(event) -> None:
+            new = event.data.get("new_state")
+            if (not self.last_update_success and new is not None
+                    and new.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)):
+                self.hass.async_create_task(self.async_request_refresh())
+
+        return async_track_state_change_event(self.hass, [self.opt(CONF_SOC_ENTITY)], _changed)
 
     # --- measured load (for the model check) -----------------------------------------
 
