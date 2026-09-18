@@ -295,3 +295,20 @@ def test_planning_scenario_defaults_to_worst():
                      _loads(), GeneratorConfig(tz=TZ), PlannerConfig(tilt=TiltPlan(tilt_deg=10, tz=TZ)))
     assert plan.planning_scenario == "bad"
     assert plan.status == Status.GENERATOR
+
+
+ESPRESSO = "1549 W measured, 0.1 h/day in {} weekdays, needs inverter"
+
+
+def test_problem_when_duty_window_starts_before_the_inverter():
+    lm = LoadModel(BaseLoad(), (parse_load("Inverter", "35 W idle, 8-21, supply"),
+                                parse_load("Espresso machine", ESPRESSO.format("7-10")),
+                                parse_load("Starlink", "60 W, 24/7, needs inverter"),
+                                parse_load("Fan", "16 W, 4 h/day in 6-21, DC")), tz="America/Denver")
+    problems = lm.problems()
+    assert len(problems) == 1  # always-on AC loads and DC loads are fine
+    assert problems[0].startswith("Load 'Espresso machine': 33% of its window (7-10 weekdays)")
+    fixed = LoadModel(BaseLoad(), (parse_load("Inverter", "35 W idle, 8-21, supply"),
+                                   parse_load("Espresso machine", ESPRESSO.format("8-10"))),
+                      tz="America/Denver")
+    assert fixed.problems() == []

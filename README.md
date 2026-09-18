@@ -25,7 +25,8 @@ This one assumes it isn't.
     `NAS: 18-22`, `Starlink + router: 8-17 weekdays, off weekends`, `Inverter: off`. Steps apply cumulatively;
     the most restrictive schedule for a load wins, and cutting the inverter also stops the AC loads that need
     it (the advice lists what else each step cuts and how much it saves).
-  - Items the planner can't parse are listed in the Status `problems` attribute.
+  - Items the planner can't parse are listed in the Status `problems` attribute, and so is a duty load (`h/day in …`)
+    whose window reaches outside the inverter's hours: its time is spread over the whole window, so that share is lost.
 - **Learn a load**: pick it in *Load to learn*, press *Start learning*, keep it off for ~20 s, switch it on
   when *Learning* says so, then off again (or press *Finish learning* in *Average over cycles* mode for
   cycling loads such as an ice maker). The measured battery-side watts replace the estimate in the Loads item.

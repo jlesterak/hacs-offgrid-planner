@@ -170,6 +170,29 @@ class LoadModel:
                 out.append(f"Shed step '{st.label}': no load named '{st.load_name}'")
         if sum(1 for ld in self.loads if ld.supply) > 1:
             out.append("More than one load is marked 'supply'; only the first is used")
+        out += self._duty_outside_supply()
+        return out
+
+    def _duty_outside_supply(self) -> list[str]:
+        """A duty load ('0.1 h/day in 7-10') is spread evenly over its window, so any part of the window where the
+        inverter is off silently drops that share of its energy. Checked over one week in 15-minute steps."""
+        supply = self.supply()
+        if supply is None or not supply.in_use:
+            return []
+        monday = dt.datetime(2026, 1, 5, tzinfo=ZoneInfo(self.tz))
+        times = [monday + dt.timedelta(minutes=15 * i) for i in range(7 * 96)]
+        out = []
+        for ld in self.loads:
+            if not ld.in_use or ld.supply or not ld.needs_inverter or ld.hours_per_day is None:
+                continue
+            window = [t for t in times if ld.schedule.active(t)]
+            lost = sum(1 for t in window if not supply.schedule.active(t))
+            if window and lost:
+                share = f"{lost / len(window):.0%}"
+                out.append(f"Load '{ld.name}': {share} of its window ({ld.schedule.describe()}) falls outside the "
+                           f"{supply.name}'s hours ({supply.schedule.describe()}), so {share} of its "
+                           f"{ld.hours_per_day:g} h/day is left out of the plan. Move the window inside "
+                           f"the {supply.name}'s hours.")
         return out
 
     def active_steps(self) -> list[ShedStep]:
