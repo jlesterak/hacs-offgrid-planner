@@ -49,6 +49,7 @@ def _week(d: PlannerData) -> list[dict[str, Any]]:
             "load_planned_kwh": round(p.load_wh / 1000, 2),
             "min_soc": round(p.min_soc),
             "min_soc_no_action": round(p.min_soc_no_action),
+            "max_soc": round(p.max_soc),
             "end_soc": round(p.end_soc),
             "generator_h": p.generator_hours,
         })

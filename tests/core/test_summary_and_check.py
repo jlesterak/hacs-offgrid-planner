@@ -37,6 +37,8 @@ def test_daily_summary_matches_hourly_series():
     assert len(days) == 8  # today (partial) + 7
     assert sum(d.pv_wh for d in days) == pytest.approx(sc.pv_horizon_wh)
     assert min(d.min_soc for d in days) == pytest.approx(sc.with_plan.min_soc)
+    assert max(d.max_soc for d in days) == pytest.approx(max(sc.with_plan.soc))
+    assert all(d.min_soc <= d.end_soc <= d.max_soc for d in days)
     assert sum(d.generator_hours for d in days) == pytest.approx(sc.with_plan.generator_hours)
     assert days[-1].end_soc == pytest.approx(sc.with_plan.soc[-1])
     assert all(d.load_wh <= d.load_no_action_wh + 1e-6 for d in days)

@@ -70,6 +70,7 @@ class DaySummary:
     min_soc_no_action: float
     end_soc: float
     generator_hours: float = 0.0
+    max_soc: float = -1.0  # with the plan
 
 
 @dataclass
@@ -195,7 +196,7 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
 
 
 def daily_summary(sc: ScenarioPlan, tz: str) -> list[DaySummary]:
-    """Per local day: energy in and out, lowest and end-of-day SOC, with and without the plan."""
+    """Per local day: energy in and out, lowest, highest and end-of-day SOC, with and without the plan."""
     from zoneinfo import ZoneInfo
 
     zone = ZoneInfo(tz)
@@ -210,6 +211,7 @@ def daily_summary(sc: ScenarioPlan, tz: str) -> list[DaySummary]:
         d.load_wh += sc.load_w[i]
         d.load_no_action_wh += sc.load_no_action_w[i]
         d.min_soc = min(d.min_soc, sc.with_plan.soc[i])
+        d.max_soc = max(d.max_soc, sc.with_plan.soc[i])
         d.min_soc_no_action = min(d.min_soc_no_action, sc.no_action.soc[i])
         d.end_soc = sc.with_plan.soc[i]
         if gen_on and sc.with_plan.generator_on and sc.with_plan.generator_on[i]:
