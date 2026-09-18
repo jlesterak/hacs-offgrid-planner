@@ -294,6 +294,30 @@ async def test_load_model_check_from_metered_night(hass: HomeAssistant, env, aio
     assert coordinator.meter.last_discharge_w == 45.0
 
 
+async def test_baseline_from_last_night_button(hass: HomeAssistant, env, aioclient_mock) -> None:
+    entry = await _setup(hass, aioclient_mock)
+    coordinator = entry.runtime_data
+    button = "button.off_grid_planner_set_baseline_from_last_night"
+    assert hass.states.get(button).state == "unavailable"  # no night measured yet
+    from custom_components.offgrid_planner.core.loadcheck import hour_key
+    now = dt_util.utcnow()
+    for h in range(1, 30):
+        start = (now - dt.timedelta(hours=h)).replace(minute=0, second=0, microsecond=0)
+        coordinator.meter.hours[hour_key(start)] = [400.0, 3600.0]
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    check = hass.states.get("sensor.off_grid_planner_load_model_check")
+    fit = check.attributes["baseline_fit_w"]
+    assert fit > check.attributes["baseline_w"]  # 400 W measured is more than the model
+    assert any(r["name"] == "Fridge (average)" for r in check.attributes["always_on"])
+    await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    await hass.async_block_till_done()
+    assert entry.options["baseline_w"] == fit
+    # After the reload the meter is kept and the model now matches last night.
+    check = hass.states.get("sensor.off_grid_planner_load_model_check")
+    assert float(check.state) == pytest.approx(1.0, abs=0.01)
+
+
 async def test_replans_when_soc_sensor_recovers(hass: HomeAssistant, env, aioclient_mock, freezer) -> None:
     hass.states.async_set("sensor.battery_soc", "unavailable")
     await _setup(hass, aioclient_mock)

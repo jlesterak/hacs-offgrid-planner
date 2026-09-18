@@ -7,7 +7,7 @@ import math
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -62,7 +62,7 @@ from .const import (
 )
 from .core.battery import BatteryConfig, GeneratorConfig
 from .core.learn import Learner, Mode, Phase, apply_to_description
-from .core.loadcheck import EnergyMeter, LoadCheck, hour_key, last_night
+from .core.loadcheck import EnergyMeter, LoadCheck, fitted_baseline_w, hour_key, last_night
 from .core.loads import BaseLoad, Load, LoadModel, ShedStep, parse_load, parse_step
 from .core.planner import DaySummary, Plan, PlannerConfig, daily_summary, make_plan
 from .core.pv import ArrayConfig, TiltPlan
@@ -91,6 +91,9 @@ class PlannerData:
     daily: dict[str, list[DaySummary]]
     load_check: LoadCheck | None
     problems: list[str]
+    always_on: list[dict[str, Any]]
+    baseline_w: float
+    baseline_fit_w: float | None  # the baseline that would have matched last night
 
 
 def _item(summary: str, description: str) -> dict[str, Any]:
@@ -270,6 +273,19 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
                 await self.async_save_lists()
         self._notify_ui()
 
+    def suggested_baseline_w(self) -> float | None:
+        return self.data.baseline_fit_w if self.data else None
+
+    async def async_baseline_from_last_night(self) -> None:
+        new = self.suggested_baseline_w()
+        if new is None:
+            return
+        _LOGGER.info("Baseline %s W → %s W from last night's battery draw", self.opt(CONF_BASELINE_W), new)
+        # The options change reloads the entry: save the meter first so last night survives the reload.
+        await self._meter_store.async_save({"hours": self.meter.hours})
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options={**self.config_entry.options, CONF_BASELINE_W: new})
+
     async def async_set_number(self, key: str, value: float) -> None:
         self.numbers[key] = value
         await self.async_refresh()
@@ -382,8 +398,11 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         past = [p for p in scenarios[SCENARIO_EXPECTED] if p.start < now]
         modelled = {hour_key(p.start): w for p, w in zip(past, load_model.series(past), strict=True)}
         check = last_night(now, lat, lon, self.meter, modelled)
+        next_day = [p for p in scenarios[SCENARIO_EXPECTED] if now <= p.start < now + timedelta(hours=24)]
 
         fetched = dt_util.parse_datetime(self._cache["fetched"])
         return PlannerData(plan=plan, soc=soc, weather_fetched=fetched,
                            weather_stale=now - fetched > WEATHER_STALE_AFTER, loads=loads,
-                           daily=daily, load_check=check, problems=problems)
+                           daily=daily, load_check=check, problems=problems,
+                           always_on=load_model.always_on(next_day), baseline_w=load_model.base.baseline_w,
+                           baseline_fit_w=fitted_baseline_w(check, load_model.base.baseline_w) if check else None)

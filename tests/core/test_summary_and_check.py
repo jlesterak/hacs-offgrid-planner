@@ -2,7 +2,7 @@ import datetime as dt
 
 import pytest
 from core.battery import BatteryConfig, GeneratorConfig
-from core.loadcheck import EnergyMeter, hour_key, last_night
+from core.loadcheck import EnergyMeter, LoadCheck, fitted_baseline_w, hour_key, last_night
 from core.loads import BaseLoad, LoadModel, parse_load, parse_step
 from core.planner import PlannerConfig, daily_summary, make_plan
 from core.pv import ArrayConfig, TiltPlan
@@ -73,3 +73,24 @@ def test_last_night_compares_measured_with_model():
     for v in m.hours.values():
         v[1] = 1000.0
     assert last_night(now, lat, lon, m, modelled) is None
+
+
+def test_fitted_baseline_moves_the_nightly_gap_into_the_baseline():
+    t = dt.datetime(2026, 9, 17, 4, tzinfo=UTC)
+    check = LoadCheck(measured_wh=1000.0, modelled_wh=800.0, hours=10, night_start=t, night_end=t)
+    assert fitted_baseline_w(check, 43.0) == pytest.approx(63.0)
+    low = LoadCheck(measured_wh=100.0, modelled_wh=800.0, hours=10, night_start=t, night_end=t)
+    assert fitted_baseline_w(low, 43.0) == 0.0  # never negative
+
+
+def test_always_on_lists_base_parts_and_essential_loads():
+    t = dt.datetime(2026, 12, 14, 0, tzinfo=UTC)
+    periods = [WeatherPeriod(t, 1.0, 0.0, 5.0), WeatherPeriod(t + dt.timedelta(hours=1), 1.0, 0.0, 15.0)]
+    loads = LoadModel(BaseLoad(baseline_w=10, fridge_w=27, heat_w_per_degc=2),
+                      (parse_load("Heat tape", "33 W, 24/7, DC, essential"), parse_load("NAS", "40 W, 24/7")), tz=TZ)
+    rows = {r["name"]: r for r in loads.always_on(periods)}
+    assert rows["Baseline (everything not listed)"]["watts"] == 10
+    assert rows["Fridge (average)"]["watts"] == 27
+    assert rows["Furnace blower (next 24 h average)"]["watts"] == 10  # (2 × 10 °C + 0) / 2 h
+    assert rows["Heat tape"] == {"name": "Heat tape", "watts": 33, "when": "24/7"}
+    assert "NAS" not in rows

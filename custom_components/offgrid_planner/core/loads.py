@@ -142,8 +142,11 @@ class BaseLoad:
     heat_w_per_degc: float = 1.3
     heat_balance_c: float = 15.0
 
+    def heat_w(self, temp_c: float) -> float:
+        return self.heat_w_per_degc * max(0.0, self.heat_balance_c - temp_c)
+
     def mean_w(self, temp_c: float) -> float:
-        return self.baseline_w + self.fridge_w + self.heat_w_per_degc * max(0.0, self.heat_balance_c - temp_c)
+        return self.baseline_w + self.fridge_w + self.heat_w(temp_c)
 
 
 @dataclass(frozen=True)
@@ -219,6 +222,18 @@ class LoadModel:
         limits = self._limits(shed_level)
         return [self.power_w((p.start + dt.timedelta(hours=p.hours / 2)).astimezone(zone), p.temp_c,
                              limits=limits)[0] for p in periods]
+
+    def always_on(self, periods: list[WeatherPeriod]) -> list[dict]:
+        """What never gets shed, for display: the base load parts (furnace averaged over the periods) and
+        essential listed loads. Watts as entered, before inverter losses."""
+        hours = sum(p.hours for p in periods)
+        heat = sum(self.base.heat_w(p.temp_c) * p.hours for p in periods) / hours if hours else 0.0
+        rows = [{"name": "Baseline (everything not listed)", "watts": round(self.base.baseline_w), "when": "24/7"},
+                {"name": "Fridge (average)", "watts": round(self.base.fridge_w), "when": "24/7"},
+                {"name": "Furnace blower (next 24 h average)", "watts": round(heat), "when": "by temperature"}]
+        rows += [{"name": ld.name, "watts": round(ld.watts), "when": ld.schedule.describe()}
+                 for ld in self.loads if ld.essential and ld.in_use]
+        return rows
 
     def step_effects(self, periods: list[WeatherPeriod], level: int) -> list[dict]:
         """For each of the first `level` steps: energy saved over the periods and other loads it also cuts."""

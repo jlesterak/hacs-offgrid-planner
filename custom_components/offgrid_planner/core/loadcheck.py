@@ -87,3 +87,12 @@ def last_night(now: dt.datetime, lat: float, lon: float, meter: EnergyMeter,
     measured = sum(meter.hours[hour_key(h)][0] * 3600 / meter.hours[hour_key(h)][1] for h in run)
     modelled = sum(modelled_w[hour_key(h)] for h in run)
     return LoadCheck(round(measured, 1), round(modelled, 1), len(run), min(run), max(run) + HOUR)
+
+
+def fitted_baseline_w(check: LoadCheck, baseline_w: float) -> float:
+    """The baseline that would have made last night's model match the battery: the gap per hour moves into it.
+
+    Anything the model got wrong that night (a listed load left off, a colder night than the heat fit) lands in
+    the baseline too, so it is only as good as the night was typical.
+    """
+    return round(max(0.0, baseline_w + (check.measured_wh - check.modelled_wh) / check.hours), 1)

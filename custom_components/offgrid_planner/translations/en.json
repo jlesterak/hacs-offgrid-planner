@@ -28,7 +28,7 @@
         "data_description": {
           "soc_entity": "Battery SOC sensor (%), ideally from a shunt.",
           "system_factor": "Measured output ÷ rated output at high sun (0.68 for a flat roof array).",
-          "baseline_w": "Average battery draw of everything not on the shed list, excluding fridge and heat.",
+          "baseline_w": "Average battery draw of everything not on the Loads list, excluding fridge and furnace. The Load model check's button can set it from last night.",
           "heat_w_per_degc": "Furnace blower average watts per °C of outdoor temperature below 15 °C.",
           "tilt_deg": "How far the trailer can be tilted by day (0 = never).",
           "tilt_azimuth": "Compass direction the panels face when tilted (180 = south).",
@@ -68,7 +68,7 @@
         "data_description": {
           "soc_entity": "Battery SOC sensor (%), ideally from a shunt.",
           "system_factor": "Measured output ÷ rated output at high sun (0.68 for a flat roof array).",
-          "baseline_w": "Average battery draw of everything not on the shed list, excluding fridge and heat.",
+          "baseline_w": "Average battery draw of everything not on the Loads list, excluding fridge and furnace. The Load model check's button can set it from last night.",
           "heat_w_per_degc": "Furnace blower average watts per °C of outdoor temperature below 15 °C.",
           "tilt_deg": "How far the trailer can be tilted by day (0 = never).",
           "tilt_azimuth": "Compass direction the panels face when tilted (180 = south).",
@@ -187,6 +187,9 @@
       },
       "learn_finish": {
         "name": "Finish learning"
+      },
+      "baseline_from_last_night": {
+        "name": "Set baseline from last night"
       }
     }
   }

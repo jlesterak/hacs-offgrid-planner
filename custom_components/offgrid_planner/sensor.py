@@ -121,10 +121,11 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
     PlannerSensorDescription(
         key="load_model_check", state_class=SensorStateClass.MEASUREMENT, suggested_display_precision=2,
         value=lambda d: round(d.load_check.ratio, 2) if d.load_check else None,
-        attrs=lambda d: ({"measured_wh": d.load_check.measured_wh, "modelled_wh": d.load_check.modelled_wh,
-                          "hours": d.load_check.hours, "night_start": d.load_check.night_start,
-                          "night_end": d.load_check.night_end} if d.load_check else
-                         {"note": "Needs a battery power sensor and one night of data."})),
+        attrs=lambda d: {"baseline_w": d.baseline_w, "always_on": d.always_on} | (
+            {"measured_wh": d.load_check.measured_wh, "modelled_wh": d.load_check.modelled_wh,
+             "hours": d.load_check.hours, "night_start": d.load_check.night_start,
+             "night_end": d.load_check.night_end, "baseline_fit_w": d.baseline_fit_w} if d.load_check else
+            {"note": "Needs a battery power sensor and one night of data."})),
     PlannerSensorDescription(
         key="pv_tomorrow", native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY, suggested_display_precision=0,
@@ -203,7 +204,7 @@ class LearningSensor(OffgridEntity, SensorEntity):
 class PlannerSensor(OffgridEntity, SensorEntity):
     entity_description: PlannerSensorDescription
     # The hourly SOC trajectory is for charts only; keep it out of the recorder (SD card).
-    _unrecorded_attributes = frozenset({"soc_forecast", "week"})
+    _unrecorded_attributes = frozenset({"soc_forecast", "week", "always_on"})
 
     def __init__(self, coordinator, description: PlannerSensorDescription) -> None:
         super().__init__(coordinator, description.key)

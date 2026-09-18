@@ -40,10 +40,13 @@ Status (`ok` / `tilt` / `shed` / `generator`, with an `advice` attribute), lowes
 (expected and bad week, with an hourly `soc_forecast` attribute that isn't recorded), reserve reached
 without action, solar today/tomorrow, tilt gain, shed saving, generator hours / first run / fuel,
 binary sensors for tilt/shed/generator, adjustable **Reserve SOC** and **Site horizon factor**, a `week`
-attribute on Status (per day: expected and bad-week solar, load, lowest/end SOC, generator hours; not recorded)
+attribute on Status (per day: expected and bad-week solar, load, lowest/highest/end SOC, generator hours; not recorded)
 for dashboards, and **Load model check**: last night's measured battery discharge ÷ the modelled load for the
 same hours (PV is zero at night, so the shunt measures the load exactly). Well above 1 means loads are missing
-or underestimated; well below 1 means estimates are too high.
+or underestimated; well below 1 means estimates are too high. Its attributes list the `always_on` draw
+(baseline, fridge, furnace averaged over the next 24 h, essential loads) and `baseline_fit_w`, the baseline that
+would have matched last night; the **Set baseline from last night** button saves it (available once a night has
+been measured). Pick a typical night: anything else the model got wrong that night lands in the baseline too.
 
 ## Development
 
