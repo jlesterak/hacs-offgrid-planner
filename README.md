@@ -21,6 +21,9 @@ This one assumes it isn't.
   - **Loads**: what runs and when. `40 W, 24/7, needs inverter` · `1200 W, 0.3 h/day in 7-10` ·
     `60 W, 8-17 weekdays, 10-22 weekends` · `35 W idle, 24/7, supply` (the inverter: loads that need it only run
     while it is on) · `DC` = doesn't need the inverter · `essential` = never shed · check an item off when unused.
+    Days: `mon wed fri`, `mon-fri`, `fri-sun`, `weekdays`, `weekends`. Less than daily: `every other day`,
+    `every 3 days`, `twice a week`, `3 times per month`, `3 h/week`; these are averaged over every day, because the
+    planner can't know which days they fall on.
   - **Shed steps**: ordered cutbacks, top first, drag to reorder. Each step cuts one load to a schedule:
     `NAS: 18-22`, `Starlink + router: 8-17 weekdays, off weekends`, `Inverter: off`. Steps apply cumulatively;
     the most restrictive schedule for a load wins, and cutting the inverter also stops the AC loads that need

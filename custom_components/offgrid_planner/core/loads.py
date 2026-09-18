@@ -7,6 +7,9 @@ Loads (one to-do item each; the description holds the numbers):
     "35 W idle, 24/7, supply"                      the inverter itself: other loads that
                                                    "need inverter" only run while it is on
     "6 W, 24/7, DC, essential"                     never shed
+    "900 W, 1 h/day in 12-15, mon wed fri"         named days ("mon-fri" ranges work too)
+    "900 W, 1 h in 12-15, every other day"         also "every 3 days", "2 times a week", "3 h/week":
+                                                   averaged over all days (the planner can't know which)
     "1180 W measured, …"                           learned at the battery: losses already included
 A checked-off load is not in use at all.
 
@@ -29,12 +32,31 @@ DAY_WORDS = {"daily": "daily", "every day": "daily", "weekdays": "weekdays", "we
              "weekends": "weekends", "weekend": "weekends"}
 
 
+DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_DAY = r"(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)s?"
+_DAY_RANGE = re.compile(rf"\b{_DAY}\s*-\s*{_DAY}\b", re.I)
+_DAY_NAME = re.compile(rf"\b{_DAY}\b", re.I)
+
+
+def _named_days(text: str) -> str | None:
+    """'mon wed fri', 'Mondays and Thursdays', 'mon-fri', 'fri-sun' → canonical 'mon wed fri' (Monday first)."""
+    found: set[int] = set()
+    for a, b in _DAY_RANGE.findall(text):
+        i, j = DAY_NAMES.index(a[:3].lower()), DAY_NAMES.index(b[:3].lower())
+        found.update(range(i, j + 1) if i <= j else [*range(i, 7), *range(0, j + 1)])
+    for d in _DAY_NAME.findall(_DAY_RANGE.sub("", text)):
+        found.add(DAY_NAMES.index(d[:3].lower()))
+    return " ".join(DAY_NAMES[i] for i in sorted(found)) or None
+
+
 def _day_matches(days: str, local: dt.datetime) -> bool:
     if days == "weekdays":
         return local.weekday() < 5
     if days == "weekends":
         return local.weekday() >= 5
-    return True
+    if days == "daily":
+        return True
+    return DAY_NAMES[local.weekday()] in days.split()
 
 
 @dataclass(frozen=True)
@@ -121,6 +143,11 @@ class Load:
     essential: bool = False
     in_use: bool = True
     battery_side: bool = False  # learned at the battery: inverter losses already included
+    every_days: float = 1.0  # runs one day in this many ('every other day' = 2); energy averaged over all days
+
+    def describe(self) -> str:
+        when = self.schedule.describe()
+        return when if self.every_days == 1 else f"{when}, every {self.every_days:g} days"
 
 
 @dataclass(frozen=True)
@@ -237,7 +264,7 @@ class LoadModel:
                 w *= min(1.0, ld.hours_per_day / sched_h) if sched_h > 0 else 0.0
             if ld.needs_inverter and not ld.battery_side:
                 w /= self.inverter_efficiency
-            total += w
+            total += w / ld.every_days
         return total, running
 
     def series(self, periods: list[WeatherPeriod], shed_level: int = 0) -> list[float]:
@@ -254,7 +281,7 @@ class LoadModel:
         rows = [{"name": "Baseline (everything not listed)", "watts": round(self.base.baseline_w), "when": "24/7"},
                 {"name": "Fridge (average)", "watts": round(self.base.fridge_w), "when": "24/7"},
                 {"name": "Furnace blower (next 24 h average)", "watts": round(heat), "when": "by temperature"}]
-        rows += [{"name": ld.name, "watts": round(ld.watts), "when": ld.schedule.describe()}
+        rows += [{"name": ld.name, "watts": round(ld.watts), "when": ld.describe()}
                  for ld in self.loads if ld.essential and ld.in_use]
         return rows
 
@@ -279,7 +306,9 @@ class LoadModel:
 # --- parsing to-do items ------------------------------------------------------------
 
 _W = re.compile(r"(\d+(?:\.\d+)?)\s*w\b", re.I)
-_H = re.compile(r"(\d+(?:\.\d+)?)\s*h(?:ours?)?\s*(?:/\s*day|per\s+day)?\b", re.I)
+_H = re.compile(r"(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?\s*(?:(?:/|per|a)\s*(day|week|wk))?\b", re.I)
+_EVERY = re.compile(r"\bevery\s+(other|second|third|\d+(?:\.\d+)?)(?:st|nd|rd|th)?\s+days?\b", re.I)
+_TIMES = re.compile(r"\b(once|twice|\d+(?:\.\d+)?)\s*(?:times|x|×)?\s*(?:a|per|/)\s*(week|wk|month)\b", re.I)
 _WIN = re.compile(r"(?<![\d.])(\d{1,2}(?::\d{2})?)\s*-\s*(\d{1,2}(?::\d{2})?)(?![\d.])")
 _ARROW = re.compile(r"\s*(?:→|->|=>|:)\s*")
 
@@ -303,7 +332,7 @@ def parse_schedule(text: str) -> Schedule:
         low = seg.strip().lower()
         if not low:
             continue
-        days = next((v for k, v in DAY_WORDS.items() if re.search(rf"\b{k}\b", low)), None)
+        days = next((v for k, v in DAY_WORDS.items() if re.search(rf"\b{k}\b", low)), None) or _named_days(low)
         win = _WIN.search(_H.sub("", _W.sub("", low)))
         if re.search(r"24/7|\balways\b|\ball day\b", low):
             rules.append(Rule(days or "daily"))
@@ -324,6 +353,18 @@ def parse_schedule(text: str) -> Schedule:
     return Schedule(tuple(rules))
 
 
+def _every_days(text: str) -> float:
+    """'every other day' → 2, 'every 3 days' → 3, 'twice a week' → 3.5, '1 time per month' → 30."""
+    if m := _EVERY.search(text):
+        n = {"other": 2.0, "second": 2.0, "third": 3.0}.get(m.group(1).lower()) or float(m.group(1))
+        return max(1.0, n)
+    if m := _TIMES.search(text):
+        n = {"once": 1.0, "twice": 2.0}.get(m.group(1).lower()) or float(m.group(1))
+        period = 30.0 if m.group(2).lower() == "month" else 7.0
+        return max(1.0, period / n) if n > 0 else 1.0
+    return 1.0
+
+
 def parse_load(summary: str, description: str | None, completed: bool = False) -> Load | None:
     """Parse one Loads item. Returns None when no wattage is given."""
     text = description or ""
@@ -332,18 +373,22 @@ def parse_load(summary: str, description: str | None, completed: bool = False) -
         return None
     low = text.lower()
     h = _H.search(_W.sub("", text))
+    hours = float(h.group(1)) if h else None
+    if hours is not None and h.group(2) and h.group(2).lower() in ("week", "wk"):
+        hours /= 7  # '3 h/week' = spread over every day
     is_supply = bool(re.search(r"\bsupply\b", low))
     needs = not is_supply and not re.search(r"\bdc\b", low)
     return Load(
         name=summary.strip(),
         watts=float(w.group(1)),
-        hours_per_day=float(h.group(1)) if h and float(h.group(1)) < 24 else None,
+        hours_per_day=hours if hours is not None and hours < 24 else None,
         schedule=parse_schedule(re.sub(r"\(.*?\)", "", text)),
         needs_inverter=needs,
         supply=is_supply,
         essential=bool(re.search(r"\b(essential|never shed|keep)\b", low)),
         in_use=not completed,
         battery_side=bool(re.search(r"\bmeasured\b", low)),
+        every_days=_every_days(re.sub(r"\(.*?\)", "", low)),  # notes in brackets don't count
     )
 
 

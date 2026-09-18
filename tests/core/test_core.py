@@ -312,3 +312,40 @@ def test_problem_when_duty_window_starts_before_the_inverter():
                                    parse_load("Espresso machine", ESPRESSO.format("8-10"))),
                       tz="America/Denver")
     assert fixed.problems() == []
+
+
+@pytest.mark.parametrize(("text", "every"), [
+    ("900 W, 1 h in 12-15, every other day", 2), ("900 W, 1 h in 12-15, every 3 days", 3),
+    ("900 W, 1 h in 12-15, every 3rd day", 3), ("900 W, 1 h in 12-15, twice a week", 3.5),
+    ("900 W, 1 h in 12-15, 2x/week", 3.5), ("900 W, 1 h in 12-15, once a week", 7),
+    ("900 W, 1 h in 12-15, 3 times per month", 10), ("900 W, 1 h/day in 12-15", 1),
+    ("60 W, 24/7, needs inverter", 1), ("900 W, 1 h/day in 12-15 (was every other day)", 1),
+])
+def test_every_n_days(text, every):
+    ld = parse_load("Dishwasher", text)
+    assert ld.every_days == pytest.approx(every)
+    assert ld.hours_per_day in (1, None)
+
+
+def test_hours_per_week_and_named_days():
+    assert parse_load("Vacuum", "600 W, 3 h/week in 10-16").hours_per_day == pytest.approx(3 / 7)
+    mwf = parse_load("Laundry", "500 W, 1 h/day in 12-15, mon wed fri").schedule
+    tue = dt.datetime(2026, 9, 15, 13)
+    assert [mwf.active(tue + dt.timedelta(days=d)) for d in range(-1, 6)] == [
+        True, False, True, False, True, False, False]  # Mon … Sun
+    assert mwf.describe() == "12-15 mon wed fri"
+    assert parse_load("x", "5 W, 8-17 Mondays and Thursdays").schedule.describe() == "8-17 mon thu"
+    wrap = parse_load("x", "5 W, 18-23 fri-sun, 8-17 mon-thu").schedule
+    assert wrap.describe() == "18-23 fri sat sun, 8-17 mon tue wed thu"
+    assert wrap.active(dt.datetime(2026, 9, 20, 20))  # Sunday evening
+    assert not wrap.active(dt.datetime(2026, 9, 20, 10))
+
+
+def test_every_other_day_halves_the_average_energy():
+    daily = LoadModel(BaseLoad(0, 0, 0), (parse_load("Dishwasher", "900 W, 1 h in 12-15, DC"),), tz="UTC")
+    alt = LoadModel(BaseLoad(0, 0, 0), (parse_load("Dishwasher", "900 W, 1 h in 12-15, every other day, DC"),),
+                    tz="UTC")
+    t = dt.datetime(2026, 9, 15, 13, tzinfo=UTC)
+    assert daily.power_w(t, 20)[0] == pytest.approx(300)
+    assert alt.power_w(t, 20)[0] == pytest.approx(150)
+    assert alt.always_on([]) and alt.loads[0].describe() == "12-15, every 2 days"
