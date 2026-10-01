@@ -80,7 +80,9 @@ def last_night(now: dt.datetime, lat: float, lon: float, meter: EnergyMeter,
         if is_night_hour:
             run.append(t)
         elif run and elev >= NIGHT_ELEVATION:
-            break  # reached the previous day: stop at the most recent night
+            if len(run) >= MIN_NIGHT_HOURS:
+                break  # reached the previous day: stop at the most recent night
+            run = []  # tonight is too short so far (early evening): use the night before
         t -= HOUR
     if len(run) < MIN_NIGHT_HOURS:
         return None

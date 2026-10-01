@@ -75,6 +75,20 @@ def test_last_night_compares_measured_with_model():
     assert last_night(now, lat, lon, m, modelled) is None
 
 
+def test_last_night_early_evening_uses_previous_night():
+    lat, lon = YUMA
+    # 21:30 local (04:30 UTC next day): tonight has ~3 dark hours, under the minimum.
+    now = dt.datetime(2026, 9, 17, 4, 30, tzinfo=UTC)
+    m, modelled = EnergyMeter(), {}
+    for h in range(30):
+        start = now.replace(minute=0) - dt.timedelta(hours=h + 1)
+        m.hours[hour_key(start)] = [90.0, 3600.0]
+        modelled[hour_key(start)] = 75.0
+    check = last_night(now, lat, lon, m, modelled)
+    assert check is not None and check.hours >= 8
+    assert check.night_end < dt.datetime(2026, 9, 16, 15, tzinfo=UTC)  # ended the morning before
+
+
 def test_fitted_baseline_moves_the_nightly_gap_into_the_baseline():
     t = dt.datetime(2026, 9, 17, 4, tzinfo=UTC)
     check = LoadCheck(measured_wh=1000.0, modelled_wh=800.0, hours=10, night_start=t, night_end=t)
