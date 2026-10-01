@@ -13,8 +13,8 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import (
-    CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
     PERCENTAGE,
+    UnitOfDensity,
     UnitOfEnergy,
     UnitOfTime,
     UnitOfVolume,
@@ -188,7 +188,7 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
         attrs=_air_attrs),
     PlannerSensorDescription(
         key="pm2_5_forecast", device_class=SensorDeviceClass.PM25, state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER, suggested_display_precision=0,
+        native_unit_of_measurement=UnitOfDensity.MICROGRAMS_PER_CUBIC_METER, suggested_display_precision=0,
         value=lambda d: (n := air_now(d)) and n.pm2_5),
     PlannerSensorDescription(
         key="weather_updated", device_class=SensorDeviceClass.TIMESTAMP, entity_category=EntityCategory.DIAGNOSTIC,
