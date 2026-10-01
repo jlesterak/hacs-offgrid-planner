@@ -22,7 +22,7 @@ from custom_components.offgrid_planner.const import (
     NUMBER_RESERVE,
 )
 from custom_components.offgrid_planner.core.solar import position
-from custom_components.offgrid_planner.core.weather import ENSEMBLE_URL, FORECAST_URL
+from custom_components.offgrid_planner.core.weather import AIR_URL, COMPARE_MODELS, ENSEMBLE_URL, FORECAST_URL
 
 LAT, LON = 32.69, -114.63  # Yuma
 SHED = "todo.off_grid_planner_shed_steps"
@@ -54,6 +54,31 @@ def _hourly(sky: float, members: int = 0) -> dict:
     return {"hourly": hourly}
 
 
+def _models(sky: float) -> dict:
+    """Multi-model response: HRRR dimmer than the main forecast and only 48 h long, UKMO the same."""
+    base = _hourly(sky)["hourly"]
+    n48 = 24 + 48
+    return {"hourly": {"time": base["time"],
+                       "shortwave_radiation_ncep_hrrr_conus": [g * 0.5 if i < n48 else None
+                                                              for i, g in enumerate(base["shortwave_radiation"])],
+                       "shortwave_radiation_ukmo_seamless": base["shortwave_radiation"]}}
+
+
+def _air(pm2_5: float) -> dict:
+    start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    times = [(start + dt.timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M") for i in range(72)]
+    return {"hourly": {"time": times, "aerosol_optical_depth": [0.4] * 72,
+                       "pm2_5": [5.0] * 10 + [pm2_5] + [5.0] * 61, "dust": [2.0] * 72, "us_aqi": [20] * 72}}
+
+
+def _mock_weather(aioclient_mock, sky=1.0, members=10, pm2_5=8.0) -> None:
+    # The model comparison shares the forecast URL; first registered match wins.
+    aioclient_mock.get(FORECAST_URL, params={"models": ",".join(COMPARE_MODELS)}, json=_models(sky))
+    aioclient_mock.get(FORECAST_URL, json=_hourly(sky))
+    aioclient_mock.get(ENSEMBLE_URL, json=_hourly(sky, members=members))
+    aioclient_mock.get(AIR_URL, json=_air(pm2_5))
+
+
 @pytest.fixture
 async def env(hass: HomeAssistant):
     hass.config.latitude, hass.config.longitude = LAT, LON
@@ -62,9 +87,8 @@ async def env(hass: HomeAssistant):
     hass.states.async_set("sensor.battery_power", "-45", {"device_class": "power", "unit_of_measurement": "W"})
 
 
-async def _setup(hass, aioclient_mock, sky=1.0, members=10):
-    aioclient_mock.get(FORECAST_URL, json=_hourly(sky))
-    aioclient_mock.get(ENSEMBLE_URL, json=_hourly(sky, members=members))
+async def _setup(hass, aioclient_mock, sky=1.0, members=10, pm2_5=8.0):
+    _mock_weather(aioclient_mock, sky, members, pm2_5)
     entry = MockConfigEntry(domain=DOMAIN, title="Off-Grid Planner",
                             data={CONF_SOC_ENTITY: "sensor.battery_soc", CONF_BATTERY_POWER: "sensor.battery_power"})
     entry.add_to_hass(hass)
@@ -146,8 +170,7 @@ def _legacy_entry(hass_storage, items):
 
 
 async def _setup_entry(hass, aioclient_mock, entry):
-    aioclient_mock.get(FORECAST_URL, json=_hourly(1.0))
-    aioclient_mock.get(ENSEMBLE_URL, json=_hourly(1.0, members=5))
+    _mock_weather(aioclient_mock, members=5)
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -216,8 +239,7 @@ async def test_learn_load_updates_shed_item(hass: HomeAssistant, env, aioclient_
 
 
 async def test_learn_without_power_sensor_fails_cleanly(hass: HomeAssistant, env, aioclient_mock) -> None:
-    aioclient_mock.get(FORECAST_URL, json=_hourly(1.0))
-    aioclient_mock.get(ENSEMBLE_URL, json=_hourly(1.0, members=5))
+    _mock_weather(aioclient_mock, members=5)
     entry = MockConfigEntry(domain=DOMAIN, title="Off-Grid Planner", data={CONF_SOC_ENTITY: "sensor.battery_soc"})
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -232,13 +254,55 @@ async def test_offline_keeps_planning_from_cache(hass: HomeAssistant, env, aiocl
     entry = await _setup(hass, aioclient_mock)
     coordinator = entry.runtime_data
     aioclient_mock.clear_requests()
-    aioclient_mock.get(FORECAST_URL, exc=aiohttp.ClientError("no internet"))
-    aioclient_mock.get(ENSEMBLE_URL, exc=aiohttp.ClientError("no internet"))
+    for url in (FORECAST_URL, ENSEMBLE_URL, AIR_URL):
+        aioclient_mock.get(url, exc=aiohttp.ClientError("no internet"))
     coordinator._cache["fetched"] = (dt_util.utcnow() - dt.timedelta(hours=2)).isoformat()
     async_fire_time_changed(hass, dt_util.utcnow() + dt.timedelta(minutes=16))
     await hass.async_block_till_done()
     assert coordinator.last_update_success
     assert hass.states.get("sensor.off_grid_planner_status").state != "unavailable"
+    assert hass.states.get("sensor.off_grid_planner_status").attributes["planning_scenario"] == "bad_week"
+    assert hass.states.get("sensor.off_grid_planner_pm2_5_forecast").state == "5.0"
+
+
+async def test_partial_slow_fetch_keeps_last_ensemble(hass: HomeAssistant, env, aioclient_mock) -> None:
+    entry = await _setup(hass, aioclient_mock)
+    coordinator = entry.runtime_data
+    aioclient_mock.clear_requests()
+    _mock_weather_without = [(FORECAST_URL, {"models": ",".join(COMPARE_MODELS)}, _models(1.0)),
+                             (FORECAST_URL, None, _hourly(1.0)), (AIR_URL, None, _air(8.0))]
+    for url, params, data in _mock_weather_without:
+        aioclient_mock.get(url, params=params, json=data)
+    aioclient_mock.get(ENSEMBLE_URL, exc=aiohttp.ClientError("timeout"))
+    old = (dt_util.utcnow() - dt.timedelta(hours=7)).isoformat()
+    coordinator._cache["fetched"] = coordinator._slow["fetched"] = old
+    await coordinator.async_refresh()
+    assert coordinator._slow["ensemble"] is not None
+    assert coordinator._slow["fetched"] == old  # incomplete: retried with the next hourly fetch
+    assert hass.states.get("sensor.off_grid_planner_status").attributes["planning_scenario"] == "bad_week"
+
+
+async def test_model_comparison_and_air_quality(hass: HomeAssistant, env, aioclient_mock) -> None:
+    await _setup(hass, aioclient_mock, pm2_5=60.0)
+    tomorrow = hass.states.get("sensor.off_grid_planner_solar_tomorrow").attributes
+    models = tomorrow["models_wh"]
+    assert set(models) == {"Main", "HRRR", "UKMO"}
+    # Half the sunlight gives a bit more than half the energy: the cells run cooler.
+    assert 0.5 * models["Main"] < models["HRRR"] < 0.6 * models["Main"]
+    assert models["UKMO"] == pytest.approx(models["Main"], rel=0.01)  # same GHI; only the beam/diffuse split differs
+    assert tomorrow["models_low_wh"] == models["HRRR"] and tomorrow["models_high_wh"] == max(models.values())
+    status = hass.states.get("sensor.off_grid_planner_status").attributes
+    # Member 2 of 11 (0.2 of the main forecast) ÷ the median member (0.6).
+    assert status["ensemble"] == {"ensemble": {"members": 11, "low_vs_median": 0.33}}
+    assert hass.states.get("sensor.off_grid_planner_aerosol_optical_depth").state == "0.4"
+    aod = hass.states.get("sensor.off_grid_planner_aerosol_optical_depth").attributes
+    assert aod["max_pm2_5_24h"] == 60.0 and aod["us_aqi"] == 20
+    assert hass.states.get("binary_sensor.off_grid_planner_smoke_next_24_h").state == "on"
+
+
+async def test_no_smoke_when_pm2_5_low(hass: HomeAssistant, env, aioclient_mock) -> None:
+    await _setup(hass, aioclient_mock, pm2_5=8.0)
+    assert hass.states.get("binary_sensor.off_grid_planner_smoke_next_24_h").state == "off"
 
 
 async def test_soc_unavailable_keeps_list_and_settings_usable(hass: HomeAssistant, env, aioclient_mock) -> None:

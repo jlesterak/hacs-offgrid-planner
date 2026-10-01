@@ -7,6 +7,8 @@ DOMAIN = "offgrid_planner"
 
 PLAN_INTERVAL = timedelta(minutes=15)
 WEATHER_MAX_AGE = timedelta(hours=1)
+# Ensembles (GFS 4×/day, ECMWF 2×/day) and CAMS air quality (2×/day): ~100 KB, so not hourly.
+SLOW_WEATHER_MAX_AGE = timedelta(hours=6)
 WEATHER_STALE_AFTER = timedelta(hours=12)
 MOVE_REFETCH_KM = 5.0
 FETCH_TIMEOUT_S = 30
@@ -91,6 +93,10 @@ LEGACY_SHED_LIST = (
     ("Internet: weekends", "60 W, 24 h/day, weekends (estimate)"),
     ("Internet: weekday work hours", "60 W, 9 h/day, 8-17, weekdays, essential (estimate)"),
 )
+
+# Smoke: hourly PM2.5 at or above the US EPA "unhealthy for sensitive groups" breakpoint (µg/m³).
+SMOKE_PM25 = 35.5
+AIR_LOOKAHEAD = timedelta(hours=24)
 
 SCENARIO_EXPECTED = "expected"
 SCENARIO_BAD = "bad_week"

@@ -230,3 +230,38 @@ def make_plan(scenarios: dict[str, list[WeatherPeriod]], now: dt.datetime, soc_n
         raise ValueError("no weather scenarios")
     key = planning_scenario if planning_scenario in plans else max(plans, key=lambda n: plans[n].status)
     return Plan(created=now, status=plans[key].status, planning_scenario=key, scenarios=plans)
+
+
+def model_day_pv(models: dict[str, list[WeatherPeriod]], expected: list[WeatherPeriod], now: dt.datetime,
+                 lat: float, lon: float, array: ArrayConfig, tz: str) -> dict[str, dict[str, float]]:
+    """Flat-array PV per forecast model: {"today": rest of today Wh, "tomorrow": Wh}, plus "Main" (expected).
+
+    Temperatures come from the main forecast. A model only gets a day it covers for every daylight hour
+    (HRRR stops at 48 h), so a short model never looks like a dark day.
+    """
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(tz)
+    today = now.astimezone(zone).date()
+    temps = {p.start: p.temp_c for p in expected}
+
+    def local_day(p):
+        return (p.start + dt.timedelta(hours=p.hours / 2)).astimezone(zone).date()
+
+    wanted = {"today": today, "tomorrow": today + dt.timedelta(days=1)}
+    daylight = {name: {p.start for p in expected if local_day(p) == day and p.ghi > 0
+                       and (name != "today" or p.start + dt.timedelta(hours=p.hours) > now)}
+                for name, day in wanted.items()}
+    out: dict[str, dict[str, float]] = {}
+    for model, periods in {"Main": expected, **models}.items():
+        periods = [replace(p, temp_c=temps.get(p.start, p.temp_c)) for p in periods] if model != "Main" else periods
+        days = {}
+        for name, day in wanted.items():
+            sel = [p for p in periods if local_day(p) == day
+                   and (name != "today" or p.start + dt.timedelta(hours=p.hours) > now)]
+            if not daylight[name] or not daylight[name] <= {p.start for p in sel}:
+                continue
+            days[name] = round(sum(w * p.hours for p, w in zip(sel, pv_series(sel, lat, lon, array), strict=True)))
+        if days:
+            out[model] = days
+    return out

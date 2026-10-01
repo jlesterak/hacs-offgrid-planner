@@ -21,6 +21,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    AIR_LOOKAHEAD,
     CONF_BASELINE_W,
     CONF_BATTERY_POWER,
     CONF_CAPACITY_WH,
@@ -56,6 +57,7 @@ from .const import (
     SCENARIO_BAD,
     SCENARIO_EXPECTED,
     SHED_STORAGE_KEY,
+    SLOW_WEATHER_MAX_AGE,
     STORAGE_VERSION,
     WEATHER_MAX_AGE,
     WEATHER_STALE_AFTER,
@@ -64,15 +66,23 @@ from .core.battery import BatteryConfig, GeneratorConfig
 from .core.learn import Learner, Mode, Phase, apply_to_description
 from .core.loadcheck import EnergyMeter, LoadCheck, fitted_baseline_w, hour_key, last_night
 from .core.loads import BaseLoad, Load, LoadModel, ShedStep, parse_load, parse_step
-from .core.planner import DaySummary, Plan, PlannerConfig, daily_summary, make_plan
+from .core.planner import DaySummary, Plan, PlannerConfig, daily_summary, make_plan, model_day_pv
 from .core.pv import ArrayConfig, TiltPlan
 from .core.weather import (
+    AIR_URL,
     ENSEMBLE_URL,
     FORECAST_URL,
+    MODEL_NAMES,
+    AirPeriod,
+    air_params,
+    compare_params,
     ensemble_params,
+    ensemble_summary,
     forecast_params,
+    parse_air,
     parse_ensemble,
     parse_forecast,
+    parse_models,
     pessimistic,
 )
 
@@ -94,6 +104,21 @@ class PlannerData:
     always_on: list[dict[str, Any]]
     baseline_w: float
     baseline_fit_w: float | None  # the baseline that would have matched last night
+    model_pv: dict[str, dict[str, float]]  # {model name: {"today": Wh, "tomorrow": Wh}}
+    ensemble: dict[str, dict[str, float | int]]  # per ensemble model: members, low-member ÷ median
+    air: list[AirPeriod]
+
+
+def air_now(d: PlannerData) -> AirPeriod | None:
+    """The air-quality hour containing now; None when the cached forecast doesn't reach now (stale)."""
+    now = dt_util.utcnow()
+    return next((p for p in d.air if p.start <= now < p.start + timedelta(hours=1)), None)
+
+
+def air_window(d: PlannerData) -> list[AirPeriod]:
+    """Air-quality hours from the current hour to AIR_LOOKAHEAD ahead."""
+    now = dt_util.utcnow()
+    return [p for p in d.air if now - timedelta(hours=1) < p.start <= now + AIR_LOOKAHEAD]
 
 
 def _item(summary: str, description: str) -> dict[str, Any]:
@@ -119,6 +144,9 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         super().__init__(hass, _LOGGER, config_entry=entry, name=DOMAIN, update_interval=PLAN_INTERVAL)
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
         self._cache: dict[str, Any] = {}
+        # Ensemble and air quality: big and slow-changing, so a separate store written every ~6 h (SD card).
+        self._slow_store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.slow")
+        self._slow: dict[str, Any] = {}
         self.numbers: dict[str, float] = dict(NUMBER_DEFAULTS)
         self._shed_store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.{SHED_STORAGE_KEY}")
@@ -139,6 +167,11 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
 
     async def async_load_cache(self) -> None:
         self._cache = await self._store.async_load() or {}
+        self._slow = await self._slow_store.async_load() or {}
+        if not self._slow and self._cache.get("ensemble"):
+            # 0.5 cache: keep the old ensemble usable offline; with no "fetched" it is refreshed when online.
+            self._slow = {"lat": self._cache.get("lat"), "lon": self._cache.get("lon"),
+                          "ensemble": self._cache.pop("ensemble")}
         meter = await self._meter_store.async_load()
         if meter:
             self.meter.hours = meter.get("hours", {})
@@ -299,28 +332,52 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
             resp.raise_for_status()
             return await resp.json()
 
+    async def _fetch_optional(self, what: str, url: str, params: dict[str, str]) -> dict[str, Any] | None:
+        try:
+            return await self._fetch_json(url, params)
+        except (TimeoutError, aiohttp.ClientError) as err:
+            _LOGGER.debug("%s unavailable: %s", what, err)
+            return None
+
     async def _maybe_refresh_weather(self, lat: float, lon: float) -> None:
         now = dt_util.utcnow()
-        fetched = self._cache.get("fetched")
-        moved = ("lat" not in self._cache
-                 or _km(self._cache["lat"], self._cache["lon"], lat, lon) > MOVE_REFETCH_KM)
-        if fetched and not moved and now - dt_util.parse_datetime(fetched) < WEATHER_MAX_AGE:
+
+        def moved(cache: dict[str, Any]) -> bool:
+            return cache.get("lat") is None or _km(cache["lat"], cache["lon"], lat, lon) > MOVE_REFETCH_KM
+
+        def due(cache: dict[str, Any], max_age: timedelta) -> bool:
+            fetched = cache.get("fetched")
+            return not fetched or moved(cache) or now - dt_util.parse_datetime(fetched) >= max_age
+
+        if not due(self._cache, WEATHER_MAX_AGE):
             return
         try:
             forecast = await self._fetch_json(FORECAST_URL, forecast_params(lat, lon))
-            ensemble = None
-            if self.opt(CONF_ENSEMBLE):
-                try:
-                    ensemble = await self._fetch_json(ENSEMBLE_URL, ensemble_params(lat, lon))
-                except (TimeoutError, aiohttp.ClientError) as err:
-                    _LOGGER.debug("Ensemble forecast unavailable: %s", err)
         except (TimeoutError, aiohttp.ClientError) as err:
             # Offline is normal off-grid: keep planning from the cached forecast.
             _LOGGER.debug("Forecast fetch failed, using cache: %s", err)
             return
+        models = await self._fetch_optional("Model comparison", FORECAST_URL, compare_params(lat, lon))
+        if models is None and not moved(self._cache):
+            models = self._cache.get("models")  # an hour old beats nothing; a different site's is wrong
         self._cache = {"fetched": now.isoformat(), "lat": round(lat, 2), "lon": round(lon, 2),
-                       "forecast": forecast, "ensemble": ensemble}
+                       "forecast": forecast, "models": models}
         await self._store.async_save(self._cache)
+
+        # Checked only after a successful main fetch (we're online), so it lags by at most WEATHER_MAX_AGE.
+        if not due(self._slow, SLOW_WEATHER_MAX_AGE):
+            return
+        keep = {} if moved(self._slow) else self._slow
+        fresh = {"ensemble": (await self._fetch_optional("Ensemble forecast", ENSEMBLE_URL, ensemble_params(lat, lon))
+                              if self.opt(CONF_ENSEMBLE) else None),
+                 "air": await self._fetch_optional("Air quality forecast", AIR_URL, air_params(lat, lon))}
+        complete = fresh["air"] is not None and (fresh["ensemble"] is not None or not self.opt(CONF_ENSEMBLE))
+        self._slow = {
+            # Only a complete fetch resets the clock; otherwise retry with the next hourly fetch.
+            "fetched": now.isoformat() if complete else keep.get("fetched"),
+            "lat": round(lat, 2), "lon": round(lon, 2),
+            **{k: v if v is not None else keep.get(k) for k, v in fresh.items()}}
+        await self._slow_store.async_save(self._slow)
 
     # --- inputs ----------------------------------------------------------------
 
@@ -364,9 +421,11 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         now = dt_util.utcnow()
 
         scenarios = {SCENARIO_EXPECTED: parse_forecast(self._cache["forecast"])}
-        if self._cache.get("ensemble"):
-            members = parse_ensemble(self._cache["ensemble"])
+        ensemble: dict[str, dict[str, float | int]] = {}
+        if self._slow.get("ensemble") and self.opt(CONF_ENSEMBLE):
+            members = parse_ensemble(self._slow["ensemble"])
             scenarios[SCENARIO_BAD] = pessimistic(scenarios[SCENARIO_EXPECTED], members, 0.1, start=now, hours=168)
+            ensemble = ensemble_summary(members, 0.1, start=now, hours=168)
 
         array = ArrayConfig(rated_w=float(self.opt(CONF_RATED_W)), k=float(self.opt(CONF_SYSTEM_FACTOR)),
                             site_horizon=self.numbers[NUMBER_SITE_HORIZON])
@@ -400,9 +459,16 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         check = last_night(now, lat, lon, self.meter, modelled)
         next_day = [p for p in scenarios[SCENARIO_EXPECTED] if now <= p.start < now + timedelta(hours=24)]
 
+        models = parse_models(self._cache["models"]) if self._cache.get("models") else {}
+        model_pv = await self.hass.async_add_executor_job(
+            model_day_pv, models, scenarios[SCENARIO_EXPECTED], now, lat, lon, array, tz)
+        model_pv = {MODEL_NAMES.get(k, k): v for k, v in model_pv.items()}
+
         fetched = dt_util.parse_datetime(self._cache["fetched"])
         return PlannerData(plan=plan, soc=soc, weather_fetched=fetched,
                            weather_stale=now - fetched > WEATHER_STALE_AFTER, loads=loads,
                            daily=daily, load_check=check, problems=problems,
                            always_on=load_model.always_on(next_day), baseline_w=load_model.base.baseline_w,
-                           baseline_fit_w=fitted_baseline_w(check, load_model.base.baseline_w) if check else None)
+                           baseline_fit_w=fitted_baseline_w(check, load_model.base.baseline_w) if check else None,
+                           model_pv=model_pv, ensemble=ensemble,
+                           air=parse_air(self._slow["air"]) if self._slow.get("air") else [])

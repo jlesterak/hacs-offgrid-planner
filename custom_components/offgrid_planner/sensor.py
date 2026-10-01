@@ -12,13 +12,19 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfTime, UnitOfVolume
+from homeassistant.const import (
+    CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+    PERCENTAGE,
+    UnitOfEnergy,
+    UnitOfTime,
+    UnitOfVolume,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import SCENARIO_EXPECTED
-from .coordinator import OffgridConfigEntry, PlannerData
+from .coordinator import OffgridConfigEntry, PlannerData, air_now, air_window
 from .core.learn import Phase
 from .core.planner import ScenarioPlan, Status
 from .entity import OffgridEntity
@@ -54,6 +60,32 @@ def _week(d: PlannerData) -> list[dict[str, Any]]:
             "generator_h": p.generator_hours,
         })
     return rows
+
+
+def _model_attrs(d: PlannerData, day: str) -> dict[str, Any]:
+    """Flat-array solar per forecast model, to show how much the models disagree."""
+    models = {name: v[day] for name, v in d.model_pv.items() if day in v}
+    if len(models) < 2:
+        return {}
+    return {"models_wh": models, "models_low_wh": min(models.values()), "models_high_wh": max(models.values())}
+
+
+def _air_attrs(d: PlannerData) -> dict[str, Any]:
+    now, ahead = air_now(d), air_window(d)
+
+    def peak(attr):
+        vals = [(getattr(p, attr), p.start) for p in ahead if getattr(p, attr) is not None]
+        return max(vals, key=lambda x: x[0]) if vals else (None, None)
+
+    pm, pm_at = peak("pm2_5")
+    aod, _ = peak("aod")
+    aqi, _ = peak("us_aqi")
+    dust, _ = peak("dust")
+    return {"us_aqi": now.us_aqi if now else None, "dust": now.dust if now else None,
+            "max_pm2_5_24h": pm, "max_pm2_5_24h_at": pm_at, "max_aod_24h": aod, "max_us_aqi_24h": aqi,
+            "max_dust_24h": dust,
+            "forecast": [{"start": p.start.isoformat(), "aod": p.aod, "pm2_5": p.pm2_5, "dust": p.dust,
+                          "us_aqi": p.us_aqi} for p in ahead]}
 
 
 def _steps_text(sc: ScenarioPlan) -> str:
@@ -95,7 +127,8 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
                          "step_effects": _planning(d).step_effects,
                          "problems": d.problems,
                          "tilt_recommended": _expected(d).tilt_recommended,
-                         "weather_stale": d.weather_stale}),
+                         "weather_stale": d.weather_stale,
+                         "ensemble": d.ensemble}),
     PlannerSensorDescription(
         key="min_soc_expected", native_unit_of_measurement=PERCENTAGE, device_class=SensorDeviceClass.BATTERY,
         suggested_display_precision=0,
@@ -113,7 +146,8 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
         value=lambda d: _planning(d).no_action.first_below),
     PlannerSensorDescription(
         key="pv_today", native_unit_of_measurement=UnitOfEnergy.WATT_HOUR, device_class=SensorDeviceClass.ENERGY,
-        suggested_display_precision=0, value=lambda d: round(_expected(d).pv_today_wh)),
+        suggested_display_precision=0, value=lambda d: round(_expected(d).pv_today_wh),
+        attrs=lambda d: _model_attrs(d, "today")),
     PlannerSensorDescription(
         key="pv_today_full", native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY, suggested_display_precision=0,
@@ -129,7 +163,8 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
     PlannerSensorDescription(
         key="pv_tomorrow", native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY, suggested_display_precision=0,
-        value=lambda d: round(_expected(d).pv_tomorrow_wh)),
+        value=lambda d: round(_expected(d).pv_tomorrow_wh),
+        attrs=lambda d: _model_attrs(d, "tomorrow")),
     PlannerSensorDescription(
         key="tilt_gain", native_unit_of_measurement=UnitOfEnergy.WATT_HOUR, suggested_display_precision=0,
         value=lambda d: round(_expected(d).tilt_gain_wh_per_day)),
@@ -147,6 +182,14 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
         key="generator_fuel", native_unit_of_measurement=UnitOfVolume.LITERS,
         device_class=SensorDeviceClass.VOLUME, suggested_display_precision=1,
         value=lambda d: round(_planning(d).with_plan.fuel_l, 2) if _planning(d).generator_needed else 0.0),
+    PlannerSensorDescription(
+        key="aerosol_optical_depth", state_class=SensorStateClass.MEASUREMENT, suggested_display_precision=2,
+        value=lambda d: (n := air_now(d)) and n.aod,
+        attrs=_air_attrs),
+    PlannerSensorDescription(
+        key="pm2_5_forecast", device_class=SensorDeviceClass.PM25, state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER, suggested_display_precision=0,
+        value=lambda d: (n := air_now(d)) and n.pm2_5),
     PlannerSensorDescription(
         key="weather_updated", device_class=SensorDeviceClass.TIMESTAMP, entity_category=EntityCategory.DIAGNOSTIC,
         value=lambda d: d.weather_fetched),
@@ -204,7 +247,7 @@ class LearningSensor(OffgridEntity, SensorEntity):
 class PlannerSensor(OffgridEntity, SensorEntity):
     entity_description: PlannerSensorDescription
     # The hourly SOC trajectory is for charts only; keep it out of the recorder (SD card).
-    _unrecorded_attributes = frozenset({"soc_forecast", "week", "always_on"})
+    _unrecorded_attributes = frozenset({"soc_forecast", "week", "always_on", "forecast", "ensemble", "models_wh"})
 
     def __init__(self, coordinator, description: PlannerSensorDescription) -> None:
         super().__init__(coordinator, description.key)

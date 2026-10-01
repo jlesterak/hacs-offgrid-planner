@@ -140,6 +140,12 @@
       },
       "load_model_check": {
         "name": "Load model check"
+      },
+      "aerosol_optical_depth": {
+        "name": "Aerosol optical depth"
+      },
+      "pm2_5_forecast": {
+        "name": "PM2.5 forecast"
       }
     },
     "binary_sensor": {
@@ -151,6 +157,9 @@
       },
       "generator_needed": {
         "name": "Generator needed"
+      },
+      "smoke_forecast": {
+        "name": "Smoke next 24 h"
       }
     },
     "number": {

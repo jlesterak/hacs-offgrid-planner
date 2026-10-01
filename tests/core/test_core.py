@@ -4,10 +4,19 @@ import math
 import pytest
 from core.battery import BatteryConfig, GeneratorConfig, simulate
 from core.loads import BaseLoad, LoadModel, parse_load, parse_step
-from core.planner import PlannerConfig, Status, make_plan
+from core.planner import PlannerConfig, Status, make_plan, model_day_pv
 from core.pv import ArrayConfig, TiltPlan, low_sun_factor, pv_series
 from core.solar import erbs_split, position
-from core.weather import WeatherPeriod, parse_ensemble, parse_forecast, percentile_member, pessimistic
+from core.weather import (
+    WeatherPeriod,
+    ensemble_summary,
+    parse_air,
+    parse_ensemble,
+    parse_forecast,
+    parse_models,
+    percentile_member,
+    pessimistic,
+)
 
 UTC = dt.UTC
 TZ = "America/Phoenix"
@@ -231,6 +240,55 @@ def test_pessimistic_scales_main_forecast_by_ensemble_spread():
     assert bad[0].ghi == pytest.approx(500)  # darkest member "c" is normal on day 1
     assert bad[30].ghi == pytest.approx(500 * 300 / 900) and bad[30].beam_h == pytest.approx(400 / 3)
     assert all(b.ghi <= m.ghi for b, m in zip(bad, main, strict=True))
+
+
+def test_parse_ensemble_multi_model_keys():
+    data = {"hourly": {"time": ["2026-09-16T13:00"],
+                       "shortwave_radiation_ncep_gefs025": [500],
+                       "shortwave_radiation_member01_ncep_gefs025": [400],
+                       "shortwave_radiation_ecmwf_ifs025_ensemble": [450],
+                       "shortwave_radiation_member01_ecmwf_ifs025_ensemble": [None]}}
+    members = parse_ensemble(data)
+    assert set(members) == {"ncep_gefs025/member00", "ncep_gefs025/member01", "ecmwf_ifs025_ensemble/member00"}
+    assert members["ncep_gefs025/member01"][0].ghi == 400
+
+
+def test_pessimistic_normalizes_each_model_to_its_own_median():
+    start = dt.datetime(2026, 9, 16, 0, tzinfo=UTC)
+    main = [WeatherPeriod(start + dt.timedelta(hours=h), 1.0, 500.0, 20.0) for h in range(24)]
+
+    def member(ghi):
+        return [WeatherPeriod(start + dt.timedelta(hours=h), 1.0, ghi, 20.0) for h in range(24)]
+
+    # "bright" runs 2× sunnier than "dim" but has the same relative spread except one 50 % member in "dim".
+    members = {f"bright/m{i}": member(g) for i, g in enumerate((1000, 1000, 1000, 900, 1000))}
+    members |= {f"dim/m{i}": member(g) for i, g in enumerate((500, 500, 250, 500, 500))}
+    bad = pessimistic(main, members, q=0.0)
+    assert bad[0].ghi == pytest.approx(250)  # dim's 50 % member, not bright's raw 900
+    summary = ensemble_summary(members, 0.0)
+    assert summary == {"bright": {"members": 5, "low_vs_median": 0.9}, "dim": {"members": 5, "low_vs_median": 0.5}}
+
+
+def test_parse_models_and_air_skip_missing():
+    data = {"hourly": {"time": ["2026-09-16T13:00", "2026-09-16T14:00"],
+                       "shortwave_radiation_ncep_hrrr_conus": [400, None],
+                       "shortwave_radiation_gem_hrdps_continental": [None, None]}}
+    models = parse_models(data)
+    assert list(models) == ["ncep_hrrr_conus"] and len(models["ncep_hrrr_conus"]) == 1
+    air = parse_air({"hourly": {"time": ["2026-09-16T13:00", "2026-09-16T14:00"],
+                                "aerosol_optical_depth": [0.3, None], "pm2_5": [12.0, None]}})
+    assert len(air) == 1 and air[0].aod == 0.3 and air[0].dust is None
+    assert air[0].start == dt.datetime(2026, 9, 16, 13, tzinfo=UTC)
+
+
+def test_model_day_pv_skips_days_a_model_does_not_cover():
+    lat, lon = YUMA
+    now = dt.datetime(2026, 9, 16, 15, tzinfo=UTC)  # 08:00 local
+    expected = week(dt.datetime(2026, 9, 16, 7, tzinfo=UTC), lat, lon, days=3)
+    short = [p for p in expected if p.start < dt.datetime(2026, 9, 17, 20, tzinfo=UTC)]  # ends mid-tomorrow
+    out = model_day_pv({"short": short, "same": expected}, expected, now, lat, lon, ArrayConfig(), TZ)
+    assert set(out["Main"]) == {"today", "tomorrow"} and out["same"] == out["Main"]
+    assert set(out["short"]) == {"today"} and out["short"]["today"] == out["Main"]["today"]
 
 
 # --- planner ---------------------------------------------------------------

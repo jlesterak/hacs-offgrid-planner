@@ -11,9 +11,21 @@ This one assumes it isn't.
 
 ## How it works
 
-- Weather: Open-Meteo hourly forecast plus an ensemble for a *bad week* (the darkest 10%), for Home
-  Assistant's home location (rounded to ~1 km), so it follows you when your home location follows GPS.
-  Fetched hourly when online and cached, so planning continues offline.
+- Weather: Open-Meteo hourly forecast for Home Assistant's home location (rounded to ~1 km), so it follows
+  you when your home location follows GPS. Fetched when online and cached, so planning continues offline.
+  - **Bad week**: a pooled ensemble of 133 members (31 GFS, 51 ECMWF IFS, 51 ECMWF AIFS). Each member is
+    compared with its own model's median, so a model that runs sunnier doesn't skew the ranking; the member at
+    the darkest 10% scales the main forecast day by day. Status `ensemble` shows each model's darkest-10% week
+    ÷ its median, to see whether the models agree.
+  - **Model comparison**: HRRR, NBM, HRDPS, ECMWF IFS, UKMO and GEM over the next 2 days. Solar today/tomorrow
+    get `models_wh` (flat-array solar per model, with the main forecast as `Main`), `models_low_wh` and
+    `models_high_wh`. A model outside its domain, or one that doesn't cover a whole day (HRRR stops at 48 h),
+    is left out of that day rather than counted as dark.
+  - **Smoke and dust**: CAMS air quality (aerosol optical depth, PM2.5, dust, US AQI) for 3 days. Shown, not
+    applied to solar: HRRR already models smoke in its radiation, so a derate would count it twice.
+  - The forecast and model comparison refresh hourly; the ensemble and air quality (~100 KB, updated 2–4×/day)
+    every 6 h, stored separately so the SD card isn't rewriting them hourly. A failed fetch keeps the last good
+    data unless you've moved more than 5 km.
 - PV: plane-of-array irradiance for flat or tilted panels, a measured low-sun factor for flat roof arrays,
   a per-site horizon factor (open desert < 1 < trees/canyon), temperature derating.
 - Loads: an always-on base (baseline, fridge, heating vs outdoor temperature) plus two editable to-do lists
@@ -43,7 +55,9 @@ This one assumes it isn't.
 Status (`ok` / `tilt` / `shed` / `generator`, with an `advice` attribute), lowest SOC next 7 days
 (expected and bad week, with an hourly `soc_forecast` attribute that isn't recorded), reserve reached
 without action, solar today/tomorrow, tilt gain, shed saving, generator hours / first run / fuel,
-binary sensors for tilt/shed/generator, adjustable **Reserve SOC** and **Site horizon factor**, a `week`
+binary sensors for tilt/shed/generator, **Aerosol optical depth** and **PM2.5 forecast** for the current hour
+(attributes: 24 h maxima and an hourly `forecast`), **Smoke next 24 h** (PM2.5 forecast to reach 35.5 µg/m³, the
+EPA "unhealthy for sensitive groups" level; unknown when the cached forecast no longer covers now), adjustable **Reserve SOC** and **Site horizon factor**, a `week`
 attribute on Status (per day: expected and bad-week solar, load, lowest/highest/end SOC, generator hours; not recorded)
 for dashboards, and **Load model check**: last night's measured battery discharge ÷ the modelled load for the
 same hours (PV is zero at night, so the shunt measures the load exactly). Well above 1 means loads are missing
