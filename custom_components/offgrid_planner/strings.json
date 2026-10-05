@@ -200,6 +200,11 @@
       "baseline_from_last_night": {
         "name": "Set baseline from last night"
       }
+    },
+    "weather": {
+      "forecast": {
+        "name": "Forecast"
+      }
     }
   }
 }

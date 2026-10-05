@@ -407,3 +407,32 @@ def test_every_other_day_halves_the_average_energy():
     assert daily.power_w(t, 20)[0] == pytest.approx(300)
     assert alt.power_w(t, 20)[0] == pytest.approx(150)
     assert alt.always_on([]) and alt.loads[0].describe() == "12-15, every 2 days"
+
+
+def test_conditions_parse_current_and_daily():
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from custom_components.offgrid_planner.core.weather import (
+        current_conditions,
+        daily_conditions,
+        parse_conditions,
+        wmo_condition,
+    )
+
+    start = dt.datetime(2026, 10, 4, 0, tzinfo=dt.UTC)
+    times = [(start + dt.timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M") for i in range(72)]
+    data = {"hourly": {"time": times, "temperature_2m": [float(i % 24) for i in range(72)],
+                       "weather_code": [0] * 30 + [63] + [3] * 41, "is_day": [0] * 72,
+                       "precipitation": [0.5] * 72, "cloud_cover": [None] * 72}}
+    hours = parse_conditions(data)
+    assert len(hours) == 72 and hours[0].condition == "clear-night" and hours[0].dew_point_c is None
+    assert current_conditions(hours, start + dt.timedelta(hours=5, minutes=20)).time.hour == 5
+    assert current_conditions(hours, start - dt.timedelta(minutes=1)) is None
+    assert current_conditions(hours, start + dt.timedelta(hours=80)) is None
+    days = daily_conditions(hours, ZoneInfo("UTC"))
+    assert [d.date.day for d in days] == [4, 5, 6]
+    assert days[1].code == 63 and wmo_condition(days[1].code) == "rainy"
+    assert days[0].temp_max_c == 23.0 and days[0].precip_mm == 12.0 and days[0].cloud_cover is None
+    # an old cache without the new variables still parses
+    assert parse_conditions({"hourly": {"time": times[:2], "temperature_2m": [1.0, 2.0]}})[0].condition is None

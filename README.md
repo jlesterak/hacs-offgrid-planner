@@ -66,6 +66,13 @@ or underestimated; well below 1 means estimates are too high. Its attributes lis
 would have matched last night; the **Set baseline from last night** button saves it (available once a night has
 been measured). Pick a typical night: anything else the model got wrong that night lands in the baseline too.
 
+**Forecast** (`weather.off_grid_planner_forecast`): a standard weather entity served from the cached hourly
+forecast: temperature, dew point, humidity, cloud cover, precipitation and its probability, wind, gusts and
+direction, with hourly (72 h) and daily forecasts for any weather card. It rides on the planner's hourly
+Open-Meteo request (no extra call) and, unlike HA's own weather integrations, **keeps showing the last
+forecast when the internet is down**; `forecast_fetched` and `stale` (no fetch for 2 h) attributes say how old it is.
+It stays available while the plan itself fails (e.g. the SOC sensor drops out).
+
 ## Development
 
 ```bash

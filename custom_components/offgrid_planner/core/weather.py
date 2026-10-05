@@ -8,6 +8,9 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 AIR_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 HOURLY_VARS = ("shortwave_radiation", "direct_radiation", "diffuse_radiation", "temperature_2m")
+# Everyday weather from the same hourly request, for the weather entity (cached, so it works offline).
+CONDITION_VARS = ("dew_point_2m", "relative_humidity_2m", "cloud_cover", "precipitation", "precipitation_probability",
+                  "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "weather_code", "is_day")
 # Radiation only: the bad week scales the main forecast's radiation and keeps its temperatures.
 ENSEMBLE_VARS = ("shortwave_radiation",)
 # Pooled "grand ensemble": 31 GFS + 51 ECMWF IFS + 51 ECMWF AIFS members. Response keys carry a
@@ -46,7 +49,7 @@ def forecast_params(lat: float, lon: float, days: int = 7) -> dict[str, str]:
     return {
         "latitude": str(round_coord(lat)),
         "longitude": str(round_coord(lon)),
-        "hourly": ",".join(HOURLY_VARS),
+        "hourly": ",".join(HOURLY_VARS + CONDITION_VARS),
         "forecast_days": str(days),
         "past_days": "1",
         "timezone": "GMT",
@@ -158,6 +161,120 @@ def parse_models(data: dict) -> dict[str, list[WeatherPeriod]]:
                    for t, v in zip(h["time"], values, strict=True) if v is not None]
         if periods:
             out[key[len("shortwave_radiation_"):]] = periods
+    return out
+
+
+# WMO weather interpretation code → Home Assistant condition (the mapping HA's own open_meteo uses).
+_WMO_CONDITIONS = {
+    0: "sunny", 1: "sunny", 2: "partlycloudy", 3: "cloudy", 45: "fog", 48: "fog",
+    51: "rainy", 53: "rainy", 55: "rainy", 56: "rainy", 57: "rainy",
+    61: "rainy", 63: "rainy", 65: "pouring", 66: "rainy", 67: "rainy",
+    71: "snowy", 73: "snowy", 75: "snowy", 77: "snowy",
+    80: "rainy", 81: "pouring", 82: "pouring", 85: "snowy", 86: "snowy",
+    95: "lightning-rainy", 96: "lightning-rainy", 99: "lightning-rainy",
+}
+
+
+def wmo_condition(code: float | None, is_day: bool = True) -> str | None:
+    if code is None:
+        return None
+    cond = _WMO_CONDITIONS.get(int(code))
+    return "clear-night" if cond == "sunny" and not is_day else cond
+
+
+@dataclass(frozen=True)
+class Conditions:
+    """Weather at the instant `time` (precipitation: the hour ending at `time`). Metric, as Open-Meteo sends it."""
+
+    time: dt.datetime  # aware, UTC
+    temp_c: float | None
+    dew_point_c: float | None = None
+    humidity: float | None = None
+    cloud_cover: float | None = None  # %
+    precip_mm: float | None = None
+    precip_prob: float | None = None  # %
+    wind_kmh: float | None = None
+    gust_kmh: float | None = None
+    wind_dir: float | None = None  # degrees
+    code: int | None = None
+    is_day: bool = True
+
+    @property
+    def condition(self) -> str | None:
+        return wmo_condition(self.code, self.is_day)
+
+
+def parse_conditions(data: dict) -> list[Conditions]:
+    """Hourly conditions from the main forecast. Variables missing from an older cache come back None."""
+    h = data["hourly"]
+
+    def col(name, i):
+        values = h.get(name)
+        return None if values is None or values[i] is None else float(values[i])
+
+    out = []
+    for i, t in enumerate(h["time"]):
+        code, day = col("weather_code", i), col("is_day", i)
+        out.append(Conditions(
+            time=dt.datetime.fromisoformat(t).replace(tzinfo=dt.UTC), temp_c=col("temperature_2m", i),
+            dew_point_c=col("dew_point_2m", i), humidity=col("relative_humidity_2m", i),
+            cloud_cover=col("cloud_cover", i), precip_mm=col("precipitation", i),
+            precip_prob=col("precipitation_probability", i), wind_kmh=col("wind_speed_10m", i),
+            gust_kmh=col("wind_gusts_10m", i), wind_dir=col("wind_direction_10m", i),
+            code=None if code is None else int(code), is_day=day is None or day > 0))
+    return [c for c in out if c.temp_c is not None]
+
+
+def current_conditions(hours: list[Conditions], now: dt.datetime) -> Conditions | None:
+    """The latest hour at or before now; None when the forecast doesn't reach now (or starts after it)."""
+    past = [c for c in hours if c.time <= now]
+    if not past or now - past[-1].time > dt.timedelta(hours=1):
+        return None
+    return past[-1]
+
+
+@dataclass(frozen=True)
+class DayConditions:
+    date: dt.date  # local
+    start: dt.datetime  # local midnight, aware
+    temp_max_c: float
+    temp_min_c: float
+    dew_point_max_c: float | None
+    cloud_cover: float | None  # daytime mean %
+    precip_mm: float
+    precip_prob: float | None  # max %
+    wind_kmh: float | None  # max
+    gust_kmh: float | None  # max
+    code: int | None  # most severe of the day, as Open-Meteo's own daily weather_code
+
+
+def daily_conditions(hours: list[Conditions], tz: dt.tzinfo, from_date: dt.date | None = None) -> list[DayConditions]:
+    """Local-day aggregates. Days with fewer than 20 hours (the ragged ends of the forecast) are dropped."""
+    by_day: dict[dt.date, list[Conditions]] = {}
+    for c in hours:
+        local = c.time.astimezone(tz)
+        if from_date is None or local.date() >= from_date:
+            by_day.setdefault(local.date(), []).append(c)
+
+    def vals(cs, attr):
+        return [getattr(c, attr) for c in cs if getattr(c, attr) is not None]
+
+    out = []
+    for day, cs in sorted(by_day.items()):
+        if len(cs) < 20:
+            continue
+        temps = vals(cs, "temp_c")
+        daytime = [c for c in cs if c.is_day] or cs
+        clouds = vals(daytime, "cloud_cover")
+        dews, probs, winds, gusts, codes = (vals(cs, a) for a in
+                                             ("dew_point_c", "precip_prob", "wind_kmh", "gust_kmh", "code"))
+        out.append(DayConditions(
+            date=day, start=dt.datetime.combine(day, dt.time(), tz),
+            temp_max_c=max(temps), temp_min_c=min(temps), dew_point_max_c=max(dews) if dews else None,
+            cloud_cover=round(sum(clouds) / len(clouds)) if clouds else None,
+            precip_mm=round(sum(vals(cs, "precip_mm")), 1), precip_prob=max(probs) if probs else None,
+            wind_kmh=max(winds) if winds else None, gust_kmh=max(gusts) if gusts else None,
+            code=max(codes) if codes else None))
     return out
 
 

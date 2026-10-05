@@ -6,7 +6,8 @@ from homeassistant.core import HomeAssistant
 
 from .coordinator import OffgridConfigEntry, OffgridCoordinator
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.NUMBER, Platform.SELECT, Platform.SENSOR, Platform.TODO]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.NUMBER, Platform.SELECT, Platform.SENSOR, Platform.TODO,
+             Platform.WEATHER]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: OffgridConfigEntry) -> bool:

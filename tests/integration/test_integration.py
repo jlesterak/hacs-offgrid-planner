@@ -10,6 +10,7 @@ from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_system import METRIC_SYSTEM
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.offgrid_planner.const import (
@@ -26,6 +27,7 @@ from custom_components.offgrid_planner.core.weather import AIR_URL, COMPARE_MODE
 
 LAT, LON = 32.69, -114.63  # Yuma
 SHED = "todo.off_grid_planner_shed_steps"
+WEATHER = "weather.off_grid_planner_forecast"
 LOADS = "todo.off_grid_planner_loads"
 
 
@@ -51,6 +53,11 @@ def _hourly(sky: float, members: int = 0) -> dict:
     else:
         hourly["direct_radiation"] = [g * 0.85 for g in ghi]
         hourly["diffuse_radiation"] = [g * 0.15 for g in ghi]
+        n = len(times)
+        hourly |= {"dew_point_2m": [5.0] * n, "relative_humidity_2m": [50.0] * n, "cloud_cover": [40.0] * n,
+                   "precipitation": [0.0] * (n - 30) + [2.0] * 30, "precipitation_probability": [10.0] * n,
+                   "wind_speed_10m": [20.0] * n, "wind_gusts_10m": [40.0] * n, "wind_direction_10m": [270.0] * n,
+                   "weather_code": [2] * n, "is_day": [1 if g > 0 else 0 for g in ghi]}
     return {"hourly": hourly}
 
 
@@ -391,3 +398,44 @@ async def test_replans_when_soc_sensor_recovers(hass: HomeAssistant, env, aiocli
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     assert hass.states.get("sensor.off_grid_planner_status").state != "unavailable"
+
+
+async def _forecast(hass, kind):
+    resp = await hass.services.async_call("weather", "get_forecasts", {"entity_id": WEATHER, "type": kind},
+                                          blocking=True, return_response=True)
+    return resp[WEATHER]["forecast"]
+
+
+async def test_weather_entity_from_cache(hass: HomeAssistant, env, aioclient_mock) -> None:
+    hass.config.units = METRIC_SYSTEM
+    await _setup(hass, aioclient_mock)
+    state = hass.states.get(WEATHER)
+    assert state.state in ("partlycloudy", "clear-night")
+    assert state.attributes["temperature"] == 15.0
+    assert state.attributes["dew_point"] == 5.0
+    assert state.attributes["cloud_coverage"] == 40
+    assert state.attributes["wind_gust_speed"] == 40.0
+    assert state.attributes["stale"] is False
+    hourly = await _forecast(hass, "hourly")
+    assert len(hourly) == 72
+    assert {"dew_point", "cloud_coverage", "precipitation", "wind_speed", "wind_gust_speed"} <= hourly[0].keys()
+    daily = await _forecast(hass, "daily")
+    assert 7 <= len(daily) <= 9  # fixture runs 8 days past today
+    assert daily[0]["templow"] == 15.0 and daily[-1]["precipitation"] > 0
+
+
+async def test_weather_survives_offline_and_soc_loss(hass: HomeAssistant, env, aioclient_mock, freezer) -> None:
+    entry = await _setup(hass, aioclient_mock)
+    aioclient_mock.clear_requests()
+    for url in (FORECAST_URL, ENSEMBLE_URL, AIR_URL):
+        aioclient_mock.get(url, exc=aiohttp.ClientError("no internet"))
+    hass.states.async_set("sensor.battery_soc", "unavailable")
+    freezer.tick(dt.timedelta(hours=5))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert not entry.runtime_data.last_update_success
+    state = hass.states.get(WEATHER)
+    assert state.state != "unavailable"
+    assert state.attributes["stale"] is True
+    hourly = await _forecast(hass, "hourly")
+    assert dt_util.parse_datetime(hourly[0]["datetime"]) >= dt_util.utcnow() - dt.timedelta(hours=1)

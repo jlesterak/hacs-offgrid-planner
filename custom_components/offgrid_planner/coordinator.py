@@ -74,12 +74,14 @@ from .core.weather import (
     FORECAST_URL,
     MODEL_NAMES,
     AirPeriod,
+    Conditions,
     air_params,
     compare_params,
     ensemble_params,
     ensemble_summary,
     forecast_params,
     parse_air,
+    parse_conditions,
     parse_ensemble,
     parse_forecast,
     parse_models,
@@ -144,6 +146,8 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         super().__init__(hass, _LOGGER, config_entry=entry, name=DOMAIN, update_interval=PLAN_INTERVAL)
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
         self._cache: dict[str, Any] = {}
+        self._conditions: list[Conditions] = []
+        self._conditions_key: str | None = None
         # Ensemble and air quality: big and slow-changing, so a separate store written every ~6 h (SD card).
         self._slow_store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.slow")
         self._slow: dict[str, Any] = {}
@@ -338,6 +342,16 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         except (TimeoutError, aiohttp.ClientError) as err:
             _LOGGER.debug("%s unavailable: %s", what, err)
             return None
+
+    def conditions(self) -> tuple[datetime | None, list[Conditions]]:
+        """(fetched, hourly conditions) straight from the cache: independent of SOC, so it survives a failed plan."""
+        fetched = self._cache.get("fetched")
+        if not fetched or not self._cache.get("forecast"):
+            return None, []
+        if self._conditions_key != fetched:
+            self._conditions = parse_conditions(self._cache["forecast"])
+            self._conditions_key = fetched
+        return dt_util.parse_datetime(fetched), self._conditions
 
     async def _maybe_refresh_weather(self, lat: float, lon: float) -> None:
         now = dt_util.utcnow()
