@@ -436,3 +436,21 @@ def test_conditions_parse_current_and_daily():
     assert days[0].temp_max_c == 23.0 and days[0].precip_mm == 12.0 and days[0].cloud_cover is None
     # an old cache without the new variables still parses
     assert parse_conditions({"hourly": {"time": times[:2], "temperature_2m": [1.0, 2.0]}})[0].condition is None
+
+
+def test_listed_fridge_replaces_the_base_fridge_and_is_flagged():
+    base = BaseLoad(baseline_w=40, fridge_w=27, heat_w_per_degc=0)
+    noon = dt.datetime(2026, 9, 14, 12, tzinfo=UTC)
+    alone = LoadModel(base, (parse_load("Vent fan - front", "16 W, DC"),), tz="UTC")
+    assert alone.power_w(noon, 10.0)[0] == pytest.approx(40 + 27 + 16)
+    assert alone.problems() == []  # 'vent fan' is not the toilet fan
+    listed = LoadModel(base, (parse_load("Fridge", "40 W, 24/7, DC"),), tz="UTC")
+    assert listed.power_w(noon, 10.0)[0] == pytest.approx(40 + 40)  # once, not 27 + 40
+    assert listed.problems()[0].startswith("Load 'Fridge' is the fridge")
+    checked_off = LoadModel(base, (parse_load("Fridge", "40 W, 24/7, DC", completed=True),), tz="UTC")
+    assert checked_off.power_w(noon, 10.0)[0] == pytest.approx(40 + 27)
+
+
+def test_listed_baseline_part_is_flagged_not_dropped():
+    lm = LoadModel(BaseLoad(), (parse_load("WLED controllers", "4 W, 24/7, DC"),), tz="UTC")
+    assert "counted twice" in lm.problems()[0]

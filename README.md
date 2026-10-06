@@ -42,6 +42,9 @@ This one assumes it isn't.
     it (the advice lists what else each step cuts and how much it saves).
   - Items the planner can't parse are listed in the Status `problems` attribute, and so is a duty load (`h/day in …`)
     whose window reaches outside the inverter's hours: its time is spread over the whole window, so that share is lost.
+  - Don't list what the base already carries. A listed **fridge** or **furnace** replaces the base's own term (so it
+    counts once) and is noted in `problems`; a listed Pi, WLED, toilet fan or BMS/shunt is part of the measured
+    baseline, so it is flagged as counted twice: check it off, or refit the baseline after a typical night.
 - **Learn a load**: pick it in *Load to learn*, press *Start learning*, keep it off for ~20 s, switch it on
   when *Learning* says so, then off again (or press *Finish learning* in *Average over cycles* mode for
   cycling loads such as an ice maker). The measured battery-side watts replace the estimate in the Loads item.

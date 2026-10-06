@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import cached_property
 from zoneinfo import ZoneInfo
 
 from .weather import WeatherPeriod
@@ -176,6 +177,21 @@ class BaseLoad:
         return self.baseline_w + self.fridge_w + self.heat_w(temp_c)
 
 
+# Loads list names that are already part of the base load. A listed fridge or furnace replaces the base's own term,
+# so it counts once. The baseline is one measured lump, so a listed baseline item can only be flagged: check it off,
+# or refit the baseline ("Set baseline from last night" subtracts whatever the list already models).
+_BASE_PARTS = (
+    ("fridge", re.compile(r"\b(fridge|refrigerator)\b", re.I)),
+    ("furnace", re.compile(r"\bfurnace\b", re.I)),
+    ("baseline", re.compile(r"\b(pi|picebox|raspberry|wled|toilet|bms|shunt)\b", re.I)),
+)
+
+
+def base_part(name: str) -> str | None:
+    """Which part of the base load a Loads item's name duplicates, if any."""
+    return next((part for part, rx in _BASE_PARTS if rx.search(name)), None)
+
+
 @dataclass(frozen=True)
 class LoadModel:
     base: BaseLoad
@@ -190,6 +206,41 @@ class LoadModel:
     def supply(self) -> Load | None:
         return next((ld for ld in self.loads if ld.supply), None)
 
+    def _listed_base_parts(self) -> dict[str, str]:
+        """In-use listed loads that duplicate a base part: part → load name (first one wins)."""
+        out: dict[str, str] = {}
+        for ld in self.loads:
+            if ld.in_use and (part := base_part(ld.name)):
+                out.setdefault(part, ld.name)
+        return out
+
+    @cached_property
+    def effective_base(self) -> BaseLoad:
+        """The base load with any part the Loads list also carries (fridge, furnace) taken out, so each watt counts
+        once."""
+        listed = self._listed_base_parts()
+        base = self.base
+        if "fridge" in listed:
+            base = replace(base, fridge_w=0.0)
+        if "furnace" in listed:
+            base = replace(base, heat_w_per_degc=0.0)
+        return base
+
+    def _base_overlap_problems(self) -> list[str]:
+        out = []
+        for part, name in self._listed_base_parts().items():
+            if part == "fridge":
+                out.append(f"Load '{name}' is the fridge, which the base load also carries "
+                           f"({self.base.fridge_w:g} W average): the listed one is used and the base fridge dropped.")
+            elif part == "furnace":
+                out.append(f"Load '{name}' is the furnace, which the base load also models from outdoor "
+                           f"temperature: the listed one is used and the base furnace fit dropped.")
+            else:
+                out.append(f"Load '{name}' looks like part of the always-on baseline ({self.base.baseline_w:g} W: "
+                           f"Pi, WLED controllers, toilet fan, BMS/shunt), so it is counted twice. Check it off, or "
+                           f"press 'Set baseline from last night' after a typical night.")
+        return out
+
     def problems(self) -> list[str]:
         out = []
         for st in self.steps:
@@ -197,6 +248,7 @@ class LoadModel:
                 out.append(f"Shed step '{st.label}': no load named '{st.load_name}'")
         if sum(1 for ld in self.loads if ld.supply) > 1:
             out.append("More than one load is marked 'supply'; only the first is used")
+        out += self._base_overlap_problems()
         out += self._duty_outside_supply()
         return out
 
@@ -250,7 +302,7 @@ class LoadModel:
         limits = self._limits(level) if limits is None else limits
         supply = self.supply()
         supply_on = supply is None or self._on(supply, local, limits, True)
-        total, running = self.base.mean_w(temp_c), set()
+        total, running = self.effective_base.mean_w(temp_c), set()
         for ld in self.loads:
             if not self._on(ld, local, limits, supply_on):
                 continue
@@ -276,10 +328,11 @@ class LoadModel:
     def always_on(self, periods: list[WeatherPeriod]) -> list[dict]:
         """What never gets shed, for display: the base load parts (furnace averaged over the periods) and
         essential listed loads. Watts as entered, before inverter losses."""
+        base = self.effective_base
         hours = sum(p.hours for p in periods)
-        heat = sum(self.base.heat_w(p.temp_c) * p.hours for p in periods) / hours if hours else 0.0
-        rows = [{"name": "Baseline (everything not listed)", "watts": round(self.base.baseline_w), "when": "24/7"},
-                {"name": "Fridge (average)", "watts": round(self.base.fridge_w), "when": "24/7"},
+        heat = sum(base.heat_w(p.temp_c) * p.hours for p in periods) / hours if hours else 0.0
+        rows = [{"name": "Baseline (everything not listed)", "watts": round(base.baseline_w), "when": "24/7"},
+                {"name": "Fridge (average)", "watts": round(base.fridge_w), "when": "24/7"},
                 {"name": "Furnace blower (next 24 h average)", "watts": round(heat), "when": "by temperature"}]
         rows += [{"name": ld.name, "watts": round(ld.watts), "when": ld.describe()}
                  for ld in self.loads if ld.essential and ld.in_use]
