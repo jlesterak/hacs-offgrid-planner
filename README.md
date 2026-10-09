@@ -57,7 +57,10 @@ This one assumes it isn't.
 
 Status (`ok` / `tilt` / `shed` / `generator`, with an `advice` attribute), lowest SOC next 7 days
 (expected and bad week, with an hourly `soc_forecast` attribute that isn't recorded), reserve reached
-without action, solar today/tomorrow, tilt gain, shed saving, generator hours / first run / fuel,
+without action, solar today/tomorrow, tilt gain, shed saving, generator hours / first run / fuel, **Generator first run length** and **Generator energy next 7 days**
+(kWh into the battery; both list every recommended `runs` entry with start, end, hours, kWh and fuel, within
+the generator's allowed hours), **Shed level** (how many shed steps to apply, top first; `generator_also_needed`
+when every step is not enough),
 binary sensors for tilt/shed/generator, **Aerosol optical depth** and **PM2.5 forecast** for the current hour
 (attributes: 24 h maxima and an hourly `forecast`), **Smoke next 24 h** (PM2.5 forecast to reach 35.5 µg/m³, the
 EPA "unhealthy for sensitive groups" level; unknown when the cached forecast no longer covers now), adjustable **Reserve SOC** and **Site horizon factor**, a `week`

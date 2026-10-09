@@ -47,6 +47,7 @@ class ScenarioPlan:
     tilt_recommended: bool
     no_action: SimResult
     shed_level: int | None  # steps applied; None: shedding alone is not enough
+    step_total: int  # active shed steps available
     shed_steps: list[str]  # labels of the applied steps (all active steps when the generator is needed)
     shed_saving_wh_per_day: float
     step_effects: list[dict]  # per applied step: saved_wh_per_day, also_cuts
@@ -182,6 +183,7 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
         tilt_recommended=tilt_ok,
         no_action=no_action,
         shed_level=shed_level,
+        step_total=len(steps),
         shed_steps=[st.label for st in steps[:applied]],
         shed_saving_wh_per_day=saving,
         step_effects=effects,
@@ -193,6 +195,26 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
         load_w=plan_load,
         load_no_action_w=base_load,
     )
+
+
+def generator_runs(sc: ScenarioPlan) -> list[dict]:
+    """The recommended generator runs, in order: when, how long, energy into the battery and fuel."""
+    res = sc.with_plan
+    if not sc.generator_needed or not res.generator_hours:
+        return []
+    per_h = {"wh": res.generator_wh / res.generator_hours, "fuel_l": res.fuel_l / res.generator_hours}
+    runs: list[dict] = []
+    for start, on in zip(sc.starts, res.generator_on, strict=False):  # periods are hourly
+        if not on:
+            continue
+        end = start + dt.timedelta(hours=1)
+        if runs and runs[-1]["end"] == start:
+            runs[-1]["end"] = end
+            runs[-1]["hours"] += 1.0
+        else:
+            runs.append({"start": start, "end": end, "hours": 1.0})
+    return [{**r, "kwh": round(r["hours"] * per_h["wh"] / 1000, 2), "fuel_l": round(r["hours"] * per_h["fuel_l"], 2)}
+            for r in runs]
 
 
 def daily_summary(sc: ScenarioPlan, tz: str) -> list[DaySummary]:

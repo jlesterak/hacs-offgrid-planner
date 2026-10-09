@@ -4,7 +4,7 @@ import math
 import pytest
 from core.battery import BatteryConfig, GeneratorConfig, simulate
 from core.loads import BaseLoad, LoadModel, parse_load, parse_step
-from core.planner import PlannerConfig, Status, make_plan, model_day_pv
+from core.planner import PlannerConfig, Status, generator_runs, make_plan, model_day_pv
 from core.pv import ArrayConfig, TiltPlan, low_sun_factor, pv_series
 from core.solar import erbs_split, position
 from core.weather import (
@@ -454,3 +454,19 @@ def test_listed_fridge_replaces_the_base_fridge_and_is_flagged():
 def test_listed_baseline_part_is_flagged_not_dropped():
     lm = LoadModel(BaseLoad(), (parse_load("WLED controllers", "4 W, 24/7, DC"),), tz="UTC")
     assert "counted twice" in lm.problems()[0]
+
+
+def test_generator_runs_merge_hours_and_total_the_plan():
+    sc = _plan(sky=0.05, soc=30, month=12).scenarios["expected"]
+    assert sc.status == Status.GENERATOR
+    runs = generator_runs(sc)
+    assert runs and sum(r["hours"] for r in runs) == pytest.approx(sc.with_plan.generator_hours)
+    assert sum(r["kwh"] for r in runs) == pytest.approx(sc.with_plan.generator_wh / 1000, abs=0.05 * len(runs))
+    assert runs[0]["start"] == sc.with_plan.generator_first_start
+    assert all(r["end"] - r["start"] == dt.timedelta(hours=r["hours"]) for r in runs)
+    assert all(8 <= r["start"].astimezone(dt.timezone(dt.timedelta(hours=-7))).hour < 20 for r in runs)  # quiet hours
+
+
+def test_no_generator_runs_when_shedding_is_enough():
+    sc = _plan(sky=1.0, soc=80).scenarios["expected"]
+    assert generator_runs(sc) == [] and sc.step_total == 5 and sc.shed_steps == []

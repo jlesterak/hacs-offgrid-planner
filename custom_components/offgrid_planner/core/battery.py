@@ -59,6 +59,7 @@ class SimResult:
     generator_first_start: dt.datetime | None
     fuel_l: float
     generator_on: list[bool] = field(default_factory=list)  # per period
+    generator_wh: float = 0.0  # delivered to the battery while it runs
 
 
 def simulate(periods: list[WeatherPeriod], soc_start: float, pv_w: list[float], load_w: list[float],
@@ -104,4 +105,5 @@ def simulate(periods: list[WeatherPeriod], soc_start: float, pv_w: list[float], 
         if first_below is None and pct < reserve_soc:
             first_below = p.start
     fuel = gen_h * generator.fuel_l_per_h() if generator else 0.0
-    return SimResult(soc, min_soc, min_at, first_below, empty_at, curtailed, unmet, gen_h, gen_first, fuel, gen_flags)
+    return SimResult(soc, min_soc, min_at, first_below, empty_at, curtailed, unmet, gen_h, gen_first, fuel, gen_flags,
+                     gen_h * generator.charge_w if generator else 0.0)

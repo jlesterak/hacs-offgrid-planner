@@ -146,6 +146,15 @@
       },
       "pm2_5_forecast": {
         "name": "PM2.5 forecast"
+      },
+      "generator_first_run_hours": {
+        "name": "Generator first run length"
+      },
+      "generator_energy": {
+        "name": "Generator energy next 7 days"
+      },
+      "shed_level": {
+        "name": "Shed level"
       }
     },
     "binary_sensor": {

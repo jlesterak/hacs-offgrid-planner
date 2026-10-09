@@ -26,7 +26,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import SCENARIO_EXPECTED
 from .coordinator import OffgridConfigEntry, PlannerData, air_now, air_window
 from .core.learn import Phase
-from .core.planner import ScenarioPlan, Status
+from .core.planner import ScenarioPlan, Status, generator_runs
 from .entity import OffgridEntity
 
 STATUS_OPTIONS = [s.name.lower() for s in Status]
@@ -60,6 +60,10 @@ def _week(d: PlannerData) -> list[dict[str, Any]]:
             "generator_h": p.generator_hours,
         })
     return rows
+
+
+def _runs_attr(sc: ScenarioPlan) -> list[dict[str, Any]]:
+    return [{**r, "start": r["start"].isoformat(), "end": r["end"].isoformat()} for r in generator_runs(sc)]
 
 
 def _model_attrs(d: PlannerData, day: str) -> dict[str, Any]:
@@ -178,6 +182,22 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
     PlannerSensorDescription(
         key="generator_first_run", device_class=SensorDeviceClass.TIMESTAMP,
         value=lambda d: _planning(d).with_plan.generator_first_start if _planning(d).generator_needed else None),
+    PlannerSensorDescription(
+        key="generator_first_run_hours", native_unit_of_measurement=UnitOfTime.HOURS,
+        suggested_display_precision=0,
+        value=lambda d: next((r["hours"] for r in generator_runs(_planning(d))), 0.0),
+        attrs=lambda d: {"runs": _runs_attr(_planning(d))}),
+    PlannerSensorDescription(
+        key="generator_energy", native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY, suggested_display_precision=1,
+        value=lambda d: round(_planning(d).with_plan.generator_wh / 1000, 2) if _planning(d).generator_needed else 0.0,
+        attrs=lambda d: {"runs": _runs_attr(_planning(d))}),
+    PlannerSensorDescription(
+        key="shed_level", state_class=SensorStateClass.MEASUREMENT,
+        value=lambda d: len(_planning(d).shed_steps),
+        attrs=lambda d: {"steps": _planning(d).shed_steps, "of": _planning(d).step_total,
+                         "generator_also_needed": _planning(d).generator_needed,
+                         "saving_wh_per_day": round(_planning(d).shed_saving_wh_per_day)}),
     PlannerSensorDescription(
         key="generator_fuel", native_unit_of_measurement=UnitOfVolume.LITERS,
         device_class=SensorDeviceClass.VOLUME, suggested_display_precision=1,
