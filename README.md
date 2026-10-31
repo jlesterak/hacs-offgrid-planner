@@ -79,6 +79,17 @@ Open-Meteo request (no extra call) and, unlike HA's own weather integrations, **
 forecast when the internet is down**; `forecast_fetched` and `stale` (no fetch for 2 h) attributes say how old it is.
 It stays available while the plan itself fails (e.g. the SOC sensor drops out).
 
+**Planned destination** (Phase 2b, 0.9.0): compare autonomy at another site before moving. Call
+`offgrid_planner.plan_destination` with `latitude`, `longitude`, `start_date`, `days` (1-31, default 7) and
+optionally `soc` (arrival %, default the SOC now), `name` and `timezone` (default HA's). Dates within ~2 weeks use
+the Open-Meteo forecast; later dates use the same dates in the last 3 years from the Open-Meteo archive (the middle
+year by sunshine is "expected", the dimmest the bad week). The result comes back as the service response and on
+**Planned destination** (`sensor.off_grid_planner_planned_destination`: ok / tilt / shed / generator, with
+`advice`, `shed_steps`, `generator_runs` and a per-day `week`). The request and raw weather are stored, so it
+replans offline after a restart and when loads or settings change; a failed fetch changes nothing.
+`offgrid_planner.clear_destination` forgets it. Same array, loads and generator as home; the site horizon
+factor is not adjusted for the new site.
+
 ## Development
 
 ```bash

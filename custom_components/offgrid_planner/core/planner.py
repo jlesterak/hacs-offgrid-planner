@@ -217,6 +217,11 @@ def generator_runs(sc: ScenarioPlan) -> list[dict]:
             for r in runs]
 
 
+def generator_runs_iso(sc: ScenarioPlan) -> list[dict]:
+    """generator_runs with ISO timestamps, for entity attributes and service responses."""
+    return [{**r, "start": r["start"].isoformat(), "end": r["end"].isoformat()} for r in generator_runs(sc)]
+
+
 def daily_summary(sc: ScenarioPlan, tz: str) -> list[DaySummary]:
     """Per local day: energy in and out, lowest, highest and end-of-day SOC, with and without the plan."""
     from zoneinfo import ZoneInfo
@@ -239,6 +244,51 @@ def daily_summary(sc: ScenarioPlan, tz: str) -> list[DaySummary]:
         if gen_on and sc.with_plan.generator_on and sc.with_plan.generator_on[i]:
             d.generator_hours += 1.0
     return list(days.values())
+
+
+def week_rows(daily: dict[str, list[DaySummary]], planning: str) -> list[dict]:
+    """One row per local day for dashboards: expected vs planning-scenario solar, load and SOC."""
+    expected = {x.day: x for x in daily.get("expected", [])}
+    plan = {x.day: x for x in daily.get(planning, [])}
+    rows = []
+    for day in sorted(set(expected) | set(plan)):
+        e, p = expected.get(day), plan.get(day) or expected.get(day)
+        rows.append({
+            "date": day.isoformat(),
+            "pv_kwh": round(e.pv_wh / 1000, 2) if e else None,
+            "pv_bad_kwh": round(p.pv_wh / 1000, 2),
+            "load_kwh": round(p.load_no_action_wh / 1000, 2),
+            "load_planned_kwh": round(p.load_wh / 1000, 2),
+            "min_soc": round(p.min_soc),
+            "min_soc_no_action": round(p.min_soc_no_action),
+            "max_soc": round(p.max_soc),
+            "end_soc": round(p.end_soc),
+            "generator_h": p.generator_hours,
+        })
+    return rows
+
+
+def _steps_text(sc: ScenarioPlan) -> str:
+    parts = []
+    for e in sc.step_effects:
+        also = f" (also cuts {', '.join(e['also_cuts'])})" if e["also_cuts"] else ""
+        parts.append(f"{e['step']}{also}")
+    return "; ".join(parts)
+
+
+def advice(sc: ScenarioPlan) -> str:
+    if sc.status == Status.GENERATOR:
+        r = sc.with_plan
+        when = r.generator_first_start.isoformat() if r.generator_first_start else "soon"
+        return (f"Generator needed: first run {when}, about {r.generator_hours:.0f} h and "
+                f"{r.fuel_l:.1f} L over the next week, even with every shed step applied.")
+    if sc.status == Status.SHED:
+        n = len(sc.shed_steps)
+        return (f"Apply shed step{'s 1–' + str(n) if n > 1 else ' 1'}: {_steps_text(sc)}. "
+                f"Saves ~{sc.shed_saving_wh_per_day:.0f} Wh/day and keeps the battery above the reserve.")
+    if sc.status == Status.TILT:
+        return f"Tilt the trailer by day: ~{sc.tilt_gain_wh_per_day:.0f} Wh/day more solar."
+    return "No action needed."
 
 
 def make_plan(scenarios: dict[str, list[WeatherPeriod]], now: dt.datetime, soc_now: float,

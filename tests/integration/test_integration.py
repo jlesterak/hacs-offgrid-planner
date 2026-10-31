@@ -9,6 +9,7 @@ import pytest
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import METRIC_SYSTEM
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
@@ -22,6 +23,7 @@ from custom_components.offgrid_planner.const import (
     LEGACY_SHED_LIST,
     NUMBER_RESERVE,
 )
+from custom_components.offgrid_planner.core.destination import ARCHIVE_URL, fetch_window, same_day
 from custom_components.offgrid_planner.core.solar import position
 from custom_components.offgrid_planner.core.weather import AIR_URL, COMPARE_MODELS, ENSEMBLE_URL, FORECAST_URL
 
@@ -439,3 +441,57 @@ async def test_weather_survives_offline_and_soc_loss(hass: HomeAssistant, env, a
     assert state.attributes["stale"] is True
     hourly = await _forecast(hass, "hourly")
     assert dt_util.parse_datetime(hourly[0]["datetime"]) >= dt_util.utcnow() - dt.timedelta(hours=1)
+
+
+DEST = "sensor.off_grid_planner_planned_destination"
+
+
+def _archive(first: dt.date, hours: int) -> dict:
+    """A past year's clear-sky hours starting at `first` 00:00 UTC (Open-Meteo labels hour-ending)."""
+    start = dt.datetime.combine(first, dt.time(), tzinfo=dt.UTC)
+    times, ghi = [], []
+    for i in range(hours):
+        end = start + dt.timedelta(hours=i + 1)
+        elev, _ = position(end - dt.timedelta(minutes=30), LAT, LON)
+        cz = math.sin(math.radians(elev))
+        times.append(end.strftime("%Y-%m-%dT%H:%M"))
+        ghi.append(round(1098 * cz * math.exp(-0.057 / cz), 1) if cz > 0.01 else 0.0)
+    return {"hourly": {"time": times, "shortwave_radiation": ghi, "temperature_2m": [15.0] * hours}}
+
+
+async def _plan(hass, **data):
+    return await hass.services.async_call(DOMAIN, "plan_destination", data, blocking=True, return_response=True)
+
+
+async def test_destination_from_forecast_then_cleared(hass: HomeAssistant, env, aioclient_mock) -> None:
+    await _setup(hass, aioclient_mock)
+    today = dt_util.now().date()
+    resp = await _plan(hass, name="Near", latitude=LAT, longitude=LON, start_date=today.isoformat(), days=3, soc=80)
+    assert resp["source"] == "forecast" and resp["destination"]["soc"] == 80 and resp["week"]
+    state = hass.states.get(DEST)
+    assert state.state in ("ok", "tilt", "shed", "generator")
+    assert state.attributes["destination"]["name"] == "Near" and state.attributes["advice"]
+    await hass.services.async_call(DOMAIN, "clear_destination", {}, blocking=True)
+    assert hass.states.get(DEST).state == "unknown"
+    assert hass.states.get(DEST).attributes["destination"] is None
+
+
+async def test_destination_from_past_years_and_offline_keeps_it(hass: HomeAssistant, env, aioclient_mock) -> None:
+    await _setup(hass, aioclient_mock)
+    start, days = dt_util.now().date() + dt.timedelta(days=60), 3
+    first, last = fetch_window(start, days)
+    for year in (start.year - 1, start.year - 2, start.year - 3):
+        a = same_day(first, year)
+        aioclient_mock.get(ARCHIVE_URL, params={"start_date": a.isoformat()},
+                           json=_archive(a, ((last - first).days + 1) * 24))
+    resp = await _plan(hass, latitude=LAT, longitude=LON, start_date=start.isoformat(), days=days)
+    assert resp["source"] == "climatology" and resp["destination"]["soc"] == 60  # SOC now by default
+    assert resp["planning_scenario"] == "bad_week"
+    assert [r["date"] for r in resp["week"]][0] == start.isoformat()
+    # Offline: a new request fails loudly and the stored destination stays.
+    aioclient_mock.clear_requests()
+    _mock_weather(aioclient_mock)
+    aioclient_mock.get(ARCHIVE_URL, exc=aiohttp.ClientError("no internet"))
+    with pytest.raises(HomeAssistantError):
+        await _plan(hass, latitude=LAT, longitude=LON, start_date=(start + dt.timedelta(days=30)).isoformat())
+    assert hass.states.get(DEST).attributes["source"] == "climatology"

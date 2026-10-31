@@ -26,7 +26,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import SCENARIO_EXPECTED
 from .coordinator import OffgridConfigEntry, PlannerData, air_now, air_window
 from .core.learn import Phase
-from .core.planner import ScenarioPlan, Status, generator_runs
+from .core.planner import ScenarioPlan, Status, advice, generator_runs, generator_runs_iso, week_rows
 from .entity import OffgridEntity
 
 STATUS_OPTIONS = [s.name.lower() for s in Status]
@@ -38,32 +38,6 @@ def _expected(d: PlannerData) -> ScenarioPlan:
 
 def _planning(d: PlannerData) -> ScenarioPlan:
     return d.plan.scenarios[d.plan.planning_scenario]
-
-
-def _week(d: PlannerData) -> list[dict[str, Any]]:
-    """One row per local day for dashboards: expected vs bad-week solar, load and SOC."""
-    expected = {x.day: x for x in d.daily.get(SCENARIO_EXPECTED, [])}
-    planning = {x.day: x for x in d.daily.get(d.plan.planning_scenario, [])}
-    rows = []
-    for day in sorted(set(expected) | set(planning)):
-        e, p = expected.get(day), planning.get(day) or expected.get(day)
-        rows.append({
-            "date": day.isoformat(),
-            "pv_kwh": round(e.pv_wh / 1000, 2) if e else None,
-            "pv_bad_kwh": round(p.pv_wh / 1000, 2),
-            "load_kwh": round(p.load_no_action_wh / 1000, 2),
-            "load_planned_kwh": round(p.load_wh / 1000, 2),
-            "min_soc": round(p.min_soc),
-            "min_soc_no_action": round(p.min_soc_no_action),
-            "max_soc": round(p.max_soc),
-            "end_soc": round(p.end_soc),
-            "generator_h": p.generator_hours,
-        })
-    return rows
-
-
-def _runs_attr(sc: ScenarioPlan) -> list[dict[str, Any]]:
-    return [{**r, "start": r["start"].isoformat(), "end": r["end"].isoformat()} for r in generator_runs(sc)]
 
 
 def _model_attrs(d: PlannerData, day: str) -> dict[str, Any]:
@@ -92,30 +66,6 @@ def _air_attrs(d: PlannerData) -> dict[str, Any]:
                           "us_aqi": p.us_aqi} for p in ahead]}
 
 
-def _steps_text(sc: ScenarioPlan) -> str:
-    parts = []
-    for e in sc.step_effects:
-        also = f" (also cuts {', '.join(e['also_cuts'])})" if e["also_cuts"] else ""
-        parts.append(f"{e['step']}{also}")
-    return "; ".join(parts)
-
-
-def _advice(d: PlannerData) -> str:
-    sc = _planning(d)
-    if sc.status == Status.GENERATOR:
-        r = sc.with_plan
-        when = r.generator_first_start.isoformat() if r.generator_first_start else "soon"
-        return (f"Generator needed: first run {when}, about {r.generator_hours:.0f} h and "
-                f"{r.fuel_l:.1f} L over the next week, even with every shed step applied.")
-    if sc.status == Status.SHED:
-        n = len(sc.shed_steps)
-        return (f"Apply shed step{'s 1–' + str(n) if n > 1 else ' 1'}: {_steps_text(sc)}. "
-                f"Saves ~{sc.shed_saving_wh_per_day:.0f} Wh/day and keeps the battery above the reserve.")
-    if sc.status == Status.TILT:
-        return f"Tilt the trailer by day: ~{sc.tilt_gain_wh_per_day:.0f} Wh/day more solar."
-    return "No action needed."
-
-
 @dataclass(frozen=True, kw_only=True)
 class PlannerSensorDescription(SensorEntityDescription):
     value: Callable[[PlannerData], Any]
@@ -126,7 +76,9 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
     PlannerSensorDescription(
         key="status", device_class=SensorDeviceClass.ENUM, options=STATUS_OPTIONS,
         value=lambda d: d.plan.status.name.lower(),
-        attrs=lambda d: {"advice": _advice(d), "week": _week(d), "planning_scenario": d.plan.planning_scenario,
+        attrs=lambda d: {"advice": advice(_planning(d)),
+                         "week": week_rows(d.daily, d.plan.planning_scenario),
+                         "planning_scenario": d.plan.planning_scenario,
                          "shed_steps": _planning(d).shed_steps,
                          "step_effects": _planning(d).step_effects,
                          "problems": d.problems,
@@ -186,12 +138,16 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
         key="generator_first_run_hours", native_unit_of_measurement=UnitOfTime.HOURS,
         suggested_display_precision=0,
         value=lambda d: next((r["hours"] for r in generator_runs(_planning(d))), 0.0),
-        attrs=lambda d: {"runs": _runs_attr(_planning(d))}),
+        attrs=lambda d: {"runs": generator_runs_iso(_planning(d))}),
     PlannerSensorDescription(
         key="generator_energy", native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY, suggested_display_precision=1,
         value=lambda d: round(_planning(d).with_plan.generator_wh / 1000, 2) if _planning(d).generator_needed else 0.0,
-        attrs=lambda d: {"runs": _runs_attr(_planning(d))}),
+        attrs=lambda d: {"runs": generator_runs_iso(_planning(d))}),
+    PlannerSensorDescription(
+        key="destination", device_class=SensorDeviceClass.ENUM, options=STATUS_OPTIONS,
+        value=lambda d: d.destination.plan.status.name.lower() if d.destination else None,
+        attrs=lambda d: d.destination.attrs() if d.destination else {"destination": None}),
     PlannerSensorDescription(
         key="shed_level", state_class=SensorStateClass.MEASUREMENT,
         value=lambda d: len(_planning(d).shed_steps),
@@ -267,7 +223,8 @@ class LearningSensor(OffgridEntity, SensorEntity):
 class PlannerSensor(OffgridEntity, SensorEntity):
     entity_description: PlannerSensorDescription
     # The hourly SOC trajectory is for charts only; keep it out of the recorder (SD card).
-    _unrecorded_attributes = frozenset({"soc_forecast", "week", "always_on", "forecast", "ensemble", "models_wh"})
+    _unrecorded_attributes = frozenset({"soc_forecast", "week", "always_on", "forecast", "ensemble", "models_wh",
+                                        "generator_runs"})
 
     def __init__(self, coordinator, description: PlannerSensorDescription) -> None:
         super().__init__(coordinator, description.key)

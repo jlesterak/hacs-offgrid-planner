@@ -155,6 +155,15 @@
       },
       "shed_level": {
         "name": "Shed level"
+      },
+      "destination": {
+        "name": "Planned destination",
+        "state": {
+          "ok": "OK",
+          "tilt": "Tilt the trailer",
+          "shed": "Shed loads",
+          "generator": "Generator needed"
+        }
       }
     },
     "binary_sensor": {
@@ -214,6 +223,46 @@
       "forecast": {
         "name": "Forecast"
       }
+    }
+  },
+  "services": {
+    "plan_destination": {
+      "name": "Plan a destination",
+      "description": "Plan autonomy at another site and dates: Open-Meteo forecast when the dates are within ~2 weeks, otherwise the same dates in the last 3 years. Stored, so it replans offline.",
+      "fields": {
+        "latitude": {
+          "name": "Latitude",
+          "description": "Site latitude."
+        },
+        "longitude": {
+          "name": "Longitude",
+          "description": "Site longitude."
+        },
+        "start_date": {
+          "name": "Start date",
+          "description": "First day at the site."
+        },
+        "days": {
+          "name": "Days",
+          "description": "Days at the site (1-31)."
+        },
+        "soc": {
+          "name": "Arrival SOC",
+          "description": "Battery % on arrival; defaults to the SOC now."
+        },
+        "name": {
+          "name": "Name",
+          "description": "A label for the site."
+        },
+        "timezone": {
+          "name": "Time zone",
+          "description": "The site's time zone; defaults to Home Assistant's."
+        }
+      }
+    },
+    "clear_destination": {
+      "name": "Clear destination",
+      "description": "Forget the planned destination."
     }
   }
 }

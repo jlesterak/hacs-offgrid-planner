@@ -6,9 +6,10 @@ import logging
 import math
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -62,11 +63,22 @@ from .const import (
     WEATHER_MAX_AGE,
     WEATHER_STALE_AFTER,
 )
+from .core import destination as dest
 from .core.battery import BatteryConfig, GeneratorConfig
 from .core.learn import Learner, Mode, Phase, apply_to_description
 from .core.loadcheck import EnergyMeter, LoadCheck, fitted_baseline_w, hour_key, last_night
 from .core.loads import BaseLoad, Load, LoadModel, ShedStep, parse_load, parse_step
-from .core.planner import DaySummary, Plan, PlannerConfig, daily_summary, make_plan, model_day_pv
+from .core.planner import (
+    DaySummary,
+    Plan,
+    PlannerConfig,
+    advice,
+    daily_summary,
+    generator_runs_iso,
+    make_plan,
+    model_day_pv,
+    week_rows,
+)
 from .core.pv import ArrayConfig, TiltPlan
 from .core.weather import (
     AIR_URL,
@@ -109,6 +121,30 @@ class PlannerData:
     model_pv: dict[str, dict[str, float]]  # {model name: {"today": Wh, "tomorrow": Wh}}
     ensemble: dict[str, dict[str, float | int]]  # per ensemble model: members, low-member ÷ median
     air: list[AirPeriod]
+    destination: Destination | None = None
+
+
+@dataclass
+class Destination:
+    """A planned stop: the plan for another site and date range, from the forecast or past years."""
+
+    request: dict[str, Any]  # name, latitude, longitude, start, days, soc, timezone
+    source: str  # "forecast" or "climatology"
+    fetched: datetime | None
+    plan: Plan
+    daily: dict[str, list[DaySummary]]
+
+    @property
+    def planning(self):
+        return self.plan.scenarios[self.plan.planning_scenario]
+
+    def attrs(self) -> dict[str, Any]:
+        sc = self.planning
+        return {"destination": self.request, "source": self.source,
+                "fetched": self.fetched.isoformat() if self.fetched else None,
+                "planning_scenario": self.plan.planning_scenario, "advice": advice(sc),
+                "shed_steps": sc.shed_steps, "generator_runs": generator_runs_iso(sc),
+                "week": week_rows(self.daily, self.plan.planning_scenario)}
 
 
 def air_now(d: PlannerData) -> AirPeriod | None:
@@ -164,6 +200,10 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         self._learn_unsub: CALLBACK_TYPE | None = None
         self._shed_listeners: list[Callable[[], None]] = []
         self.meter = EnergyMeter()
+        # Planned destination: the request and the raw responses, so it replans offline after a restart.
+        self._dest_store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.destination")
+        self._dest: dict[str, Any] = {}
+        self._dest_cached: tuple[str, Destination | None] | None = None
         self._meter_store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.meter")
 
     def opt(self, key: str) -> Any:
@@ -176,6 +216,7 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
             # 0.5 cache: keep the old ensemble usable offline; with no "fetched" it is refreshed when online.
             self._slow = {"lat": self._cache.get("lat"), "lon": self._cache.get("lon"),
                           "ensemble": self._cache.pop("ensemble")}
+        self._dest = await self._dest_store.async_load() or {}
         meter = await self._meter_store.async_load()
         if meter:
             self.meter.hours = meter.get("hours", {})
@@ -395,6 +436,10 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
 
     # --- inputs ----------------------------------------------------------------
 
+    def current_soc(self) -> float:
+        """The battery SOC now (0-100); raises UpdateFailed when the sensor is unavailable."""
+        return self._soc()
+
     def _soc(self) -> float:
         entity_id = self.opt(CONF_SOC_ENTITY)
         state = self.hass.states.get(entity_id)
@@ -422,6 +467,82 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
                 steps.append(step)
         return loads, steps, problems
 
+    def _configs(self, loads, steps, tz: str):
+        """The array, battery, load model, generator and planner settings for a site in time zone `tz`."""
+        array = ArrayConfig(rated_w=float(self.opt(CONF_RATED_W)), k=float(self.opt(CONF_SYSTEM_FACTOR)),
+                            site_horizon=self.numbers[NUMBER_SITE_HORIZON])
+        load_model = LoadModel(
+            BaseLoad(baseline_w=float(self.opt(CONF_BASELINE_W)), fridge_w=float(self.opt(CONF_FRIDGE_W)),
+                     heat_w_per_degc=float(self.opt(CONF_HEAT_W_PER_DEGC))),
+            tuple(loads), tuple(steps), tz=tz)
+        generator = (GeneratorConfig(charge_w=float(self.opt(CONF_GEN_CHARGE_W)),
+                                     allowed_start_hour=float(self.opt(CONF_GEN_START)),
+                                     allowed_end_hour=float(self.opt(CONF_GEN_END)), tz=tz)
+                     if self.opt(CONF_GENERATOR) else None)
+        cfg = PlannerConfig(
+            reserve_soc=self.numbers[NUMBER_RESERVE],
+            jack_wh_per_day=float(self.opt(CONF_JACK_WH)),
+            tilt=TiltPlan(tilt_deg=float(self.opt(CONF_TILT_DEG)), panel_az=float(self.opt(CONF_TILT_AZIMUTH)),
+                          start_hour=float(self.opt(CONF_TILT_START)),
+                          end_hour=float(self.opt(CONF_TILT_END)), tz=tz))
+        battery = BatteryConfig(capacity_wh=float(self.opt(CONF_CAPACITY_WH)))
+        return array, battery, load_model, generator, cfg
+
+    # --- planned destination -------------------------------------------------------
+
+    async def async_plan_destination(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Fetch weather for a site and dates, store it and replan. Never raises when offline: returns an error."""
+        start, days = data["start_date"], data["days"]
+        request = {"name": data.get("name"), "latitude": data["latitude"], "longitude": data["longitude"],
+                   "start": start.isoformat(), "days": days, "soc": data["soc"],
+                   "timezone": data.get("timezone") or str(self.hass.config.time_zone)}
+        source = dest.source_for(start, days, dt_util.now().date())
+        raw = {}
+        for label, (url, params) in dest.requests(source, request["latitude"], request["longitude"],
+                                                  start, days).items():
+            try:
+                raw[label] = await self._fetch_json(url, params)
+            except (TimeoutError, aiohttp.ClientError) as err:
+                _LOGGER.debug("Destination %s unavailable: %s", label, err)
+        if not dest.scenarios(source, raw, start, days):
+            return {"error": "No weather available for that site and dates (offline?). Nothing changed."}
+        self._dest = {"request": request, "source": source, "fetched": dt_util.utcnow().isoformat(), "raw": raw}
+        await self._dest_store.async_save(self._dest)
+        await self.async_refresh()
+        d = self.data.destination if self.data else None
+        return d.attrs() if d else {"error": "Stored, but the plan failed; see the log."}
+
+    async def async_clear_destination(self) -> None:
+        self._dest = {}
+        await self._dest_store.async_save(self._dest)
+        await self.async_refresh()
+
+    async def _destination(self, loads: list[Load], steps: list[ShedStep]) -> Destination | None:
+        """The destination plan, recomputed only when its inputs change. A failure never breaks the main plan."""
+        if not self._dest:
+            return None
+        sig = repr((self._dest["fetched"], self._dest["request"], self.load_items, self.step_items, self.numbers,
+                    dict(self.config_entry.data), dict(self.config_entry.options)))
+        if self._dest_cached and self._dest_cached[0] == sig:
+            return self._dest_cached[1]
+        try:
+            req = self._dest["request"]
+            start, tz = date.fromisoformat(req["start"]), req["timezone"]
+            weather = dest.scenarios(self._dest["source"], self._dest["raw"], start, req["days"])
+            array, battery, load_model, generator, cfg = self._configs(loads, steps, tz)
+            now = datetime.combine(start, time(), tzinfo=ZoneInfo(tz)).astimezone(UTC)
+            plan = await self.hass.async_add_executor_job(
+                make_plan, weather, now, req["soc"], req["latitude"], req["longitude"], array, battery,
+                load_model, generator, replace(cfg, horizon_hours=req["days"] * 24),
+                SCENARIO_BAD if SCENARIO_BAD in weather else SCENARIO_EXPECTED)
+            result = Destination(req, self._dest["source"], dt_util.parse_datetime(self._dest["fetched"]), plan,
+                                 {name: daily_summary(sc, tz) for name, sc in plan.scenarios.items()})
+        except Exception:
+            _LOGGER.exception("Destination plan failed")
+            result = None
+        self._dest_cached = (sig, result)
+        return result
+
     # --- plan ------------------------------------------------------------------
 
     async def _async_update_data(self) -> PlannerData:
@@ -441,24 +562,8 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
             scenarios[SCENARIO_BAD] = pessimistic(scenarios[SCENARIO_EXPECTED], members, 0.1, start=now, hours=168)
             ensemble = ensemble_summary(members, 0.1, start=now, hours=168)
 
-        array = ArrayConfig(rated_w=float(self.opt(CONF_RATED_W)), k=float(self.opt(CONF_SYSTEM_FACTOR)),
-                            site_horizon=self.numbers[NUMBER_SITE_HORIZON])
-        load_model = LoadModel(
-            BaseLoad(baseline_w=float(self.opt(CONF_BASELINE_W)), fridge_w=float(self.opt(CONF_FRIDGE_W)),
-                     heat_w_per_degc=float(self.opt(CONF_HEAT_W_PER_DEGC))),
-            tuple(loads), tuple(steps), tz=tz)
+        array, battery, load_model, generator, cfg = self._configs(loads, steps, tz)
         problems += load_model.problems()
-        generator = (GeneratorConfig(charge_w=float(self.opt(CONF_GEN_CHARGE_W)),
-                                     allowed_start_hour=float(self.opt(CONF_GEN_START)),
-                                     allowed_end_hour=float(self.opt(CONF_GEN_END)), tz=tz)
-                     if self.opt(CONF_GENERATOR) else None)
-        cfg = PlannerConfig(
-            reserve_soc=self.numbers[NUMBER_RESERVE],
-            jack_wh_per_day=float(self.opt(CONF_JACK_WH)),
-            tilt=TiltPlan(tilt_deg=float(self.opt(CONF_TILT_DEG)), panel_az=float(self.opt(CONF_TILT_AZIMUTH)),
-                          start_hour=float(self.opt(CONF_TILT_START)),
-                          end_hour=float(self.opt(CONF_TILT_END)), tz=tz))
-        battery = BatteryConfig(capacity_wh=float(self.opt(CONF_CAPACITY_WH)))
 
         # The simulation is CPU-bound (a few hundred ms on a Pi at most): keep it off the event loop.
         plan = await self.hass.async_add_executor_job(
@@ -485,4 +590,5 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
                            always_on=load_model.always_on(next_day), baseline_w=load_model.base.baseline_w,
                            baseline_fit_w=fitted_baseline_w(check, load_model.base.baseline_w) if check else None,
                            model_pv=model_pv, ensemble=ensemble,
-                           air=parse_air(self._slow["air"]) if self._slow.get("air") else [])
+                           air=parse_air(self._slow["air"]) if self._slow.get("air") else [],
+                           destination=await self._destination(loads, steps))

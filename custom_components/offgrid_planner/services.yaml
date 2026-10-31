@@ -1,0 +1,39 @@
+plan_destination:
+  fields:
+    latitude:
+      required: true
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: any
+    longitude:
+      required: true
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: any
+    start_date:
+      required: true
+      selector:
+        date:
+    days:
+      default: 7
+      selector:
+        number:
+          min: 1
+          max: 31
+    soc:
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    name:
+      selector:
+        text:
+    timezone:
+      selector:
+        text:
+clear_destination:
