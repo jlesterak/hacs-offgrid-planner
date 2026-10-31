@@ -495,3 +495,12 @@ async def test_destination_from_past_years_and_offline_keeps_it(hass: HomeAssist
     with pytest.raises(HomeAssistantError):
         await _plan(hass, latitude=LAT, longitude=LON, start_date=(start + dt.timedelta(days=30)).isoformat())
     assert hass.states.get(DEST).attributes["source"] == "climatology"
+
+
+async def test_destination_reports_failure_when_main_plan_fails(hass: HomeAssistant, env, aioclient_mock) -> None:
+    await _setup(hass, aioclient_mock)
+    today = dt_util.now().date()
+    await _plan(hass, name="First", latitude=LAT, longitude=LON, start_date=today.isoformat(), days=2, soc=80)
+    hass.states.async_set("sensor.battery_soc", "unavailable")
+    with pytest.raises(HomeAssistantError, match="plan failed"):
+        await _plan(hass, name="Second", latitude=LAT, longitude=LON, start_date=today.isoformat(), days=2, soc=80)

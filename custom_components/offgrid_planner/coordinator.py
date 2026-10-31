@@ -510,7 +510,9 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         await self._dest_store.async_save(self._dest)
         await self.async_refresh()
         d = self.data.destination if self.data else None
-        return d.attrs() if d else {"error": "Stored, but the plan failed; see the log."}
+        if d is None or d.request != request or not self.last_update_success:
+            return {"error": "Stored, but the plan failed (SOC sensor unavailable?); it replans on the next update."}
+        return d.attrs()
 
     async def async_clear_destination(self) -> None:
         self._dest = {}
