@@ -4,7 +4,7 @@ import math
 import pytest
 from core.battery import BatteryConfig, GeneratorConfig, simulate
 from core.loads import BaseLoad, LoadModel, parse_load, parse_step
-from core.planner import PlannerConfig, Status, generator_runs, make_plan, model_day_pv
+from core.planner import PlannerConfig, Status, advice, generator_runs, make_plan, model_day_pv
 from core.pv import ArrayConfig, TiltPlan, low_sun_factor, pv_series
 from core.solar import erbs_split, position
 from core.weather import (
@@ -323,10 +323,58 @@ def test_plan_sunny_september_is_ok():
 def test_plan_gloomy_week_sheds_in_priority_order():
     plan = _plan(sky=0.35, soc=70)
     sc = plan.scenarios["expected"]
-    assert plan.status in (Status.SHED, Status.GENERATOR)
-    if plan.status == Status.SHED:
-        assert sc.shed_steps[0] == "Espresso machine → off"
-        assert sc.with_plan.min_soc >= 20
+    assert plan.status != Status.GENERATOR and max(lv for _, lv in sc.day_levels) > 0
+    worst = sc.next_shed["steps"] if sc.next_shed else sc.shed_steps
+    assert worst[0] == "Espresso machine → off"
+    assert sc.with_plan.min_soc >= 20
+
+
+def _plan_days(skies, soc, month=11):
+    """A plan whose weather changes by day: skies[i] scales day i's clear sky."""
+    now = dt.datetime(2026, month, 14, 15, tzinfo=UTC)
+    start = now - dt.timedelta(hours=now.hour)
+    wx = []
+    for i, sky in enumerate(skies):
+        wx += week(start + dt.timedelta(days=i), *YUMA, sky=sky, days=1)
+    cfg = PlannerConfig(reserve_soc=20, tilt=TiltPlan(tilt_deg=0, tz=TZ))
+    lm = _loads()
+    plan = make_plan({"expected": wx}, now, soc, *YUMA, ArrayConfig(), BatteryConfig(), lm,
+                     GeneratorConfig(tz=TZ), cfg)
+    return plan.scenarios["expected"], lm, wx, now, cfg
+
+
+def test_shedding_waits_until_after_the_last_full_charge():
+    # Sunny for three days (the battery fills), then dark: today needs nothing, a later day sheds.
+    sc, *_ = _plan_days([1.0, 1.0, 1.0, 0.25, 0.25, 0.25, 0.25, 0.25], soc=90)
+    levels = dict(sc.day_levels)
+    assert sc.status != Status.GENERATOR
+    assert sc.shed_level == 0 and sc.status in (Status.OK, Status.TILT)
+    assert sc.next_shed and sc.next_shed["date"] >= min(levels) + dt.timedelta(days=2)
+    assert levels[min(levels) + dt.timedelta(days=1)] == 0
+    assert sc.with_plan.min_soc >= 20
+    assert "No shedding needed today" in advice(sc) or "From " in advice(sc)
+
+
+def test_per_day_plan_is_minimal():
+    # Lowering any one day's level breaks the plan: no day sheds more than it needs (pruning works,
+    # including a pre-dawn breach that the evening before covers).
+    sc, lm, wx, now, cfg = _plan_days([0.6, 0.3, 0.6, 0.3, 0.6, 0.3, 0.6, 0.3], soc=60)
+    assert sc.status != Status.GENERATOR and any(lv for _, lv in sc.day_levels)
+    import zoneinfo
+    zone = zoneinfo.ZoneInfo(TZ)
+    periods = [p for p in wx if p.start + dt.timedelta(hours=p.hours) > now][:cfg.horizon_hours]
+    pv = sc.pv_w
+    level_of = dict(sc.day_levels)
+
+    def sim(levels):
+        load = [lm.series([p], levels[(p.start + dt.timedelta(minutes=30)).astimezone(zone).date()])[0]
+                for p in periods]
+        return simulate(periods, 60, pv, load, BatteryConfig(), 20)
+
+    assert sim(level_of).min_soc >= 20
+    for day, lv in level_of.items():
+        if lv:
+            assert sim({**level_of, day: lv - 1}).min_soc < 20, day
 
 
 def test_plan_dark_week_needs_generator():

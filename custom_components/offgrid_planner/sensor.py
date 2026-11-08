@@ -72,6 +72,14 @@ class PlannerSensorDescription(SensorEntityDescription):
     attrs: Callable[[PlannerData], dict[str, Any]] | None = None
 
 
+def _by_day(sc: ScenarioPlan) -> list[dict[str, Any]]:
+    return [{"date": day.isoformat(), "level": level} for day, level in sc.day_levels]
+
+
+def _next_shed(sc: ScenarioPlan) -> dict[str, Any] | None:
+    return {**sc.next_shed, "date": sc.next_shed["date"].isoformat()} if sc.next_shed else None
+
+
 SENSORS: tuple[PlannerSensorDescription, ...] = (
     PlannerSensorDescription(
         key="status", device_class=SensorDeviceClass.ENUM, options=STATUS_OPTIONS,
@@ -81,6 +89,7 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
                          "planning_scenario": d.plan.planning_scenario,
                          "shed_steps": _planning(d).shed_steps,
                          "step_effects": _planning(d).step_effects,
+                         "next_shed": _next_shed(_planning(d)),
                          "problems": d.problems,
                          "tilt_recommended": _expected(d).tilt_recommended,
                          "weather_stale": d.weather_stale,
@@ -153,7 +162,8 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
         value=lambda d: len(_planning(d).shed_steps),
         attrs=lambda d: {"steps": _planning(d).shed_steps, "of": _planning(d).step_total,
                          "generator_also_needed": _planning(d).generator_needed,
-                         "saving_wh_per_day": round(_planning(d).shed_saving_wh_per_day)}),
+                         "saving_wh_per_day": round(_planning(d).shed_saving_wh_per_day),
+                         "by_day": _by_day(_planning(d)), "next_shed": _next_shed(_planning(d))}),
     PlannerSensorDescription(
         key="generator_fuel", native_unit_of_measurement=UnitOfVolume.LITERS,
         device_class=SensorDeviceClass.VOLUME, suggested_display_precision=1,

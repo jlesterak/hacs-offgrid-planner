@@ -50,8 +50,10 @@ This one assumes it isn't.
   cycling loads such as an ice maker). The measured battery-side watts replace the estimate in the Loads item.
   Needs a fast battery power sensor (a shunt at ~1 Hz). By day, add a solar power sensor or learn with
   steady sun; a full battery hides load changes.
-- Battery: 7-day hourly SOC simulation with curtailment when full, then a search for the smallest shed level
-  and, if that isn't enough, the earliest generator start that keeps SOC above the reserve.
+- Battery: 7-day hourly SOC simulation with curtailment when full, then a shed level **per local day**, as late
+  and as small as possible (shedding before the battery's last full charge would only be curtailed), and, if
+  every step on every day isn't enough, the earliest generator start that keeps SOC above the reserve. A bad
+  spell on Thursday doesn't make you shed on Monday; the plan is redone every hour.
 
 ## Entities
 
@@ -59,8 +61,8 @@ Status (`ok` / `tilt` / `shed` / `generator`, with an `advice` attribute), lowes
 (expected and bad week, with an hourly `soc_forecast` attribute that isn't recorded), reserve reached
 without action, solar today/tomorrow, tilt gain, shed saving, generator hours / first run / fuel, **Generator first run length** and **Generator energy next 7 days**
 (kWh into the battery; both list every recommended `runs` entry with start, end, hours, kWh and fuel, within
-the generator's allowed hours), **Shed level** (how many shed steps to apply, top first; `generator_also_needed`
-when every step is not enough),
+the generator's allowed hours), **Shed level** (how many shed steps to apply **today**, top first; `by_day` lists every day's level,
+`next_shed` the first later day that needs more, and `generator_also_needed` when every step is not enough),
 binary sensors for tilt/shed/generator, **Aerosol optical depth** and **PM2.5 forecast** for the current hour
 (attributes: 24 h maxima and an hourly `forecast`), **Smoke next 24 h** (PM2.5 forecast to reach 35.5 µg/m³, the
 EPA "unhealthy for sensitive groups" level; unknown when the cached forecast no longer covers now), adjustable **Reserve SOC** and **Site horizon factor**, a `week`
@@ -85,7 +87,7 @@ optionally `soc` (arrival %, default the SOC now), `name` and `timezone` (defaul
 the Open-Meteo forecast; later dates use the same dates in the last 3 years from the Open-Meteo archive (the middle
 year by sunshine is "expected", the dimmest the bad week). The result comes back as the service response and on
 **Planned destination** (`sensor.off_grid_planner_planned_destination`: ok / tilt / shed / generator, with
-`advice`, `shed_steps`, `generator_runs` and a per-day `week`). The request and raw weather are stored, so it
+`advice`, `shed_steps` (for the worst day of the stay), `by_day`, `generator_runs` and a per-day `week`). The request and raw weather are stored, so it
 replans offline after a restart and when loads or settings change; a failed fetch changes nothing.
 `offgrid_planner.clear_destination` forgets it. Same array, loads and generator as home; the site horizon
 factor is not adjusted for the new site.

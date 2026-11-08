@@ -2,7 +2,9 @@
 
 For each weather scenario (e.g. "expected" and "bad week"):
   1. Tilt: compare daytime-tilted vs flat PV over the next days, net of the jack's energy.
-  2. Shed: the smallest number of shed steps, in order, that keeps SOC above the reserve.
+  2. Shed: a shed level (how many steps, in order) per local day, as late and as small as possible, that
+     keeps SOC above the reserve. Shedding before the battery's last full charge is wasted (curtailed), so a
+     bad spell later in the week does not make today shed. Entities report today's level.
   3. Generator: if applying every step is not enough, simulate generator runs.
 The overall status comes from the planning scenario (the pessimistic one when available).
 """
@@ -33,6 +35,8 @@ class PlannerConfig:
     tilt_min_gain_wh_per_day: float = 300.0
     jack_wh_per_day: float = 10.0  # up in the morning, down at night; placeholder until measured
     tilt: TiltPlan = field(default_factory=lambda: TiltPlan(tilt_deg=10.0))
+    # True: shed_level/status/advice describe today (live plan). False: the highest day (a planned trip).
+    report_today: bool = True
 
 
 @dataclass
@@ -46,9 +50,9 @@ class ScenarioPlan:
     tilt_gain_wh_per_day: float
     tilt_recommended: bool
     no_action: SimResult
-    shed_level: int | None  # steps applied; None: shedding alone is not enough
+    shed_level: int | None  # steps applied today (or on the worst day, see report_today); None: generator needed
     step_total: int  # active shed steps available
-    shed_steps: list[str]  # labels of the applied steps (all active steps when the generator is needed)
+    shed_steps: list[str]  # labels of those steps (all active steps when the generator is needed)
     shed_saving_wh_per_day: float
     step_effects: list[dict]  # per applied step: saved_wh_per_day, also_cuts
     with_plan: SimResult  # the chosen tilt/shed/generator plan
@@ -59,6 +63,8 @@ class ScenarioPlan:
     pv_w: list[float] = field(default_factory=list)
     load_w: list[float] = field(default_factory=list)  # with the chosen shedding
     load_no_action_w: list[float] = field(default_factory=list)
+    day_levels: list[tuple[dt.date, int]] = field(default_factory=list)  # shed level per local day
+    next_shed: dict | None = None  # first later day that needs more shedding: {date, level, steps}
 
 
 @dataclass
@@ -72,6 +78,7 @@ class DaySummary:
     end_soc: float
     generator_hours: float = 0.0
     max_soc: float = -1.0  # with the plan
+    shed_level: int = 0
 
 
 @dataclass
@@ -80,6 +87,9 @@ class Plan:
     status: Status
     planning_scenario: str
     scenarios: dict[str, ScenarioPlan]
+
+
+FULL_SOC = 99.5  # a period ending at or above this counts as a full charge
 
 
 def _window(periods: list[WeatherPeriod], now: dt.datetime, hours: int) -> list[WeatherPeriod]:
@@ -137,22 +147,64 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
 
     no_action = simulate(periods, soc_now, flat, base_load, battery, reserve)
     steps = loads.active_steps()
+    n = len(steps)
 
-    shed_level, chosen = None, None
-    for level in range(len(steps) + 1):
-        res = simulate(periods, soc_now, pv, loads.series(periods, level) if level else base_load,
-                       battery, reserve)
-        if res.min_soc >= reserve:
-            shed_level, chosen = level, res
+    def local_day(p):
+        return (p.start + dt.timedelta(hours=p.hours / 2)).astimezone(zone).date()
+
+    plan_days = sorted({local_day(p) for p in periods})
+    day_i = [plan_days.index(local_day(p)) for p in periods]
+    by_level: dict[int, list[float]] = {0: base_load}
+
+    def level_series(level: int) -> list[float]:
+        if level not in by_level:
+            by_level[level] = loads.series(periods, level)
+        return by_level[level]
+
+    def load_for(levels: list[int]) -> list[float]:
+        return [level_series(levels[d])[i] for i, d in enumerate(day_i)]
+
+    def run(levels: list[int]) -> SimResult:
+        return simulate(periods, soc_now, pv, load_for(levels), battery, reserve)
+
+    levels = [0] * len(plan_days)
+    chosen = run(levels)
+    generator_needed = False
+    while chosen.min_soc < reserve:
+        breach = next((i for i, x in enumerate(chosen.soc) if x < reserve), 0)
+        full = max((i for i, x in enumerate(chosen.soc[:breach]) if x >= FULL_SOC), default=-1)
+        first = day_i[full + 1] if full + 1 < len(day_i) else 0
+        raise_day = next((d for d in range(day_i[breach], first - 1, -1) if levels[d] < n), None)
+        if raise_day is None:
+            generator_needed = True
             break
+        levels[raise_day] += 1
+        chosen = run(levels)
+    if not generator_needed:
+        # Raising late first can leave a pre-dawn breach day at a high level that the evening before covers.
+        for d in range(len(plan_days) - 1, -1, -1):
+            while levels[d] > 0:
+                trial = levels[:d] + [levels[d] - 1] + levels[d + 1:]
+                res = run(trial)
+                if res.min_soc < reserve:
+                    break
+                levels, chosen = trial, res
 
-    generator_needed = shed_level is None
-    applied = len(steps) if generator_needed else shed_level
     if generator_needed:
-        plan_load = loads.series(periods, applied)
+        levels = [n] * len(plan_days)
+        plan_load = load_for(levels)
         chosen = _generator_plan(periods, soc_now, pv, plan_load, battery, reserve, generator)
     else:
-        plan_load = loads.series(periods, applied) if applied else base_load
+        plan_load = load_for(levels)
+    today_i = plan_days.index(today) if today in plan_days else 0
+    applied = 0 if not levels else levels[today_i] if cfg.report_today else max(levels, default=0)
+    shed_level = None if generator_needed else applied
+    next_shed = None
+    if cfg.report_today and not generator_needed:
+        later = next((d for d in range(today_i + 1, len(plan_days)) if levels[d] > applied), None)
+        if later is not None:
+            next_shed = {"date": plan_days[later], "level": levels[later],
+                         "steps": [st.label for st in steps[:levels[later]]]}
     horizon_days = max(sum(p.hours for p in periods) / 24, 1 / 24)
     saving = (sum(w * p.hours for p, w in zip(periods, base_load, strict=True))
               - sum(w * p.hours for p, w in zip(periods, plan_load, strict=True))) / horizon_days
@@ -161,7 +213,7 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
 
     if generator_needed:
         status = Status.GENERATOR
-    elif shed_level:
+    elif applied:
         status = Status.SHED
     elif tilt_ok and no_action.min_soc < 100 and (
             no_action.min_soc < reserve + 20 or no_action.curtailed_wh < gain):
@@ -194,6 +246,8 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
         pv_w=pv,
         load_w=plan_load,
         load_no_action_w=base_load,
+        day_levels=list(zip(plan_days, levels, strict=True)),
+        next_shed=next_shed,
     )
 
 
@@ -229,11 +283,12 @@ def daily_summary(sc: ScenarioPlan, tz: str) -> list[DaySummary]:
     zone = ZoneInfo(tz)
     days: dict[dt.date, DaySummary] = {}
     gen_on = sc.generator_needed
+    level_of = dict(sc.day_levels)
     for i, start in enumerate(sc.starts):
         day = (start + dt.timedelta(minutes=30)).astimezone(zone).date()
         d = days.get(day)
         if d is None:
-            d = days[day] = DaySummary(day, 0.0, 0.0, 0.0, 101.0, 101.0, 0.0)
+            d = days[day] = DaySummary(day, 0.0, 0.0, 0.0, 101.0, 101.0, 0.0, shed_level=level_of.get(day, 0))
         d.pv_wh += sc.pv_w[i]
         d.load_wh += sc.load_w[i]
         d.load_no_action_wh += sc.load_no_action_w[i]
@@ -264,6 +319,7 @@ def week_rows(daily: dict[str, list[DaySummary]], planning: str) -> list[dict]:
             "max_soc": round(p.max_soc),
             "end_soc": round(p.end_soc),
             "generator_h": p.generator_hours,
+            "shed_level": p.shed_level,
         })
     return rows
 
@@ -276,6 +332,17 @@ def _steps_text(sc: ScenarioPlan) -> str:
     return "; ".join(parts)
 
 
+def _steps_range(n: int) -> str:
+    return f"step{'s 1–' + str(n) if n > 1 else ' 1'}"
+
+
+def _later(sc: ScenarioPlan) -> str:
+    ns = sc.next_shed
+    if not ns:
+        return ""
+    return f" From {ns['date']:%a %m-%d}: shed {_steps_range(ns['level'])} ({'; '.join(ns['steps'])})."
+
+
 def advice(sc: ScenarioPlan) -> str:
     if sc.status == Status.GENERATOR:
         r = sc.with_plan
@@ -284,11 +351,12 @@ def advice(sc: ScenarioPlan) -> str:
                 f"{r.fuel_l:.1f} L over the next week, even with every shed step applied.")
     if sc.status == Status.SHED:
         n = len(sc.shed_steps)
-        return (f"Apply shed step{'s 1–' + str(n) if n > 1 else ' 1'}: {_steps_text(sc)}. "
-                f"Saves ~{sc.shed_saving_wh_per_day:.0f} Wh/day and keeps the battery above the reserve.")
+        return (f"Apply shed {_steps_range(n)}: {_steps_text(sc)}. "
+                f"Saves ~{sc.shed_saving_wh_per_day:.0f} Wh/day and keeps the battery above the reserve."
+                + _later(sc))
     if sc.status == Status.TILT:
-        return f"Tilt the trailer by day: ~{sc.tilt_gain_wh_per_day:.0f} Wh/day more solar."
-    return "No action needed."
+        return f"Tilt the trailer by day: ~{sc.tilt_gain_wh_per_day:.0f} Wh/day more solar." + _later(sc)
+    return ("No shedding needed today." + _later(sc)) if sc.next_shed else "No action needed."
 
 
 def make_plan(scenarios: dict[str, list[WeatherPeriod]], now: dt.datetime, soc_now: float,

@@ -144,6 +144,7 @@ class Destination:
                 "fetched": self.fetched.isoformat() if self.fetched else None,
                 "planning_scenario": self.plan.planning_scenario, "advice": advice(sc),
                 "shed_steps": sc.shed_steps, "generator_runs": generator_runs_iso(sc),
+                "by_day": [{"date": day.isoformat(), "level": level} for day, level in sc.day_levels],
                 "week": week_rows(self.daily, self.plan.planning_scenario)}
 
 
@@ -535,7 +536,7 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
             now = datetime.combine(start, time(), tzinfo=ZoneInfo(tz)).astimezone(UTC)
             plan = await self.hass.async_add_executor_job(
                 make_plan, weather, now, req["soc"], req["latitude"], req["longitude"], array, battery,
-                load_model, generator, replace(cfg, horizon_hours=req["days"] * 24),
+                load_model, generator, replace(cfg, horizon_hours=req["days"] * 24, report_today=False),
                 SCENARIO_BAD if SCENARIO_BAD in weather else SCENARIO_EXPECTED)
             result = Destination(req, self._dest["source"], dt_util.parse_datetime(self._dest["fetched"]), plan,
                                  {name: daily_summary(sc, tz) for name, sc in plan.scenarios.items()})
