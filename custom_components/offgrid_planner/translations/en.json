@@ -173,6 +173,9 @@
       "shed_needed": {
         "name": "Shedding needed"
       },
+      "overnight_ok": {
+        "name": "Inverter overnight OK"
+      },
       "generator_needed": {
         "name": "Generator needed"
       },

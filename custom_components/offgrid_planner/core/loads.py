@@ -11,6 +11,9 @@ Loads (one to-do item each; the description holds the numbers):
     "900 W, 1 h in 12-15, every other day"         also "every 3 days", "2 times a week", "3 h/week":
                                                    averaged over all days (the planner can't know which)
     "1180 W measured, …"                           learned at the battery: losses already included
+    "35 W idle, 24/7, supply, 7-21 unless full"   outside 07–21 only on a night after a full charge: the
+                                                   evening of a day the battery reached 100 % and the
+                                                   morning after (the planner decides which nights)
 A checked-off load is not in use at all.
 
 Shed steps (ordered, top first; one to-do item each). Each step cuts one load down to a schedule:
@@ -145,9 +148,13 @@ class Load:
     in_use: bool = True
     battery_side: bool = False  # learned at the battery: inverter losses already included
     every_days: float = 1.0  # runs one day in this many ('every other day' = 2); energy averaged over all days
+    # '7-21 unless full': on a night that follows no full charge the load is also held to this schedule.
+    unless_full: Schedule | None = None
 
     def describe(self) -> str:
         when = self.schedule.describe()
+        if self.unless_full is not None:
+            when += f", {self.unless_full.describe()} unless full"
         return when if self.every_days == 1 else f"{when}, every {self.every_days:g} days"
 
 
@@ -289,22 +296,40 @@ class LoadModel:
             limits.setdefault(st.load_name.casefold(), []).append(st.schedule)
         return limits
 
-    def _on(self, ld: Load, local: dt.datetime, limits: dict[str, list[Schedule]], supply_on: bool) -> bool:
+    @property
+    def has_night_rule(self) -> bool:
+        return any(ld.in_use and ld.unless_full is not None for ld in self.loads)
+
+    def night_rule_on(self, local: dt.datetime, level: int = 0) -> bool | None:
+        """Whether the 'unless full' loads run at this time on an earned night with `level` steps applied.
+        None when the rule makes no difference at this time (inside their 'unless full' hours)."""
+        ruled = [ld for ld in self.loads if ld.in_use and ld.unless_full is not None
+                 and ld.schedule.active(local) and not ld.unless_full.active(local)]
+        if not ruled:
+            return None
+        running = self.power_w(local, 0.0, level)[1]
+        return all(ld.name in running for ld in ruled)
+
+    def _on(self, ld: Load, local: dt.datetime, limits: dict[str, list[Schedule]], supply_on: bool,
+            limited: bool = False) -> bool:
         if not ld.in_use or not ld.schedule.active(local):
+            return False
+        if limited and ld.unless_full is not None and not ld.unless_full.active(local):
             return False
         if any(not s.active(local) for s in limits.get(ld.name.casefold(), ())):
             return False
         return supply_on or not ld.needs_inverter or ld.supply
 
     def power_w(self, local: dt.datetime, temp_c: float, level: int = 0,
-                limits: dict[str, list[Schedule]] | None = None) -> tuple[float, set[str]]:
-        """Battery-side power at a local time with the first `level` steps applied, and the loads running."""
+                limits: dict[str, list[Schedule]] | None = None, limited: bool = False) -> tuple[float, set[str]]:
+        """Battery-side power at a local time with the first `level` steps applied, and the loads running.
+        `limited`: this time belongs to a night without a full charge ('unless full' schedules apply)."""
         limits = self._limits(level) if limits is None else limits
         supply = self.supply()
-        supply_on = supply is None or self._on(supply, local, limits, True)
+        supply_on = supply is None or self._on(supply, local, limits, True, limited)
         total, running = self.effective_base.mean_w(temp_c), set()
         for ld in self.loads:
-            if not self._on(ld, local, limits, supply_on):
+            if not self._on(ld, local, limits, supply_on, limited):
                 continue
             running.add(ld.name)
             if ld.supply:
@@ -319,11 +344,13 @@ class LoadModel:
             total += w / ld.every_days
         return total, running
 
-    def series(self, periods: list[WeatherPeriod], shed_level: int = 0) -> list[float]:
+    def series(self, periods: list[WeatherPeriod], shed_level: int = 0,
+               limited: list[bool] | None = None) -> list[float]:
         zone = ZoneInfo(self.tz)
         limits = self._limits(shed_level)
+        limited = limited or [False] * len(periods)
         return [self.power_w((p.start + dt.timedelta(hours=p.hours / 2)).astimezone(zone), p.temp_c,
-                             limits=limits)[0] for p in periods]
+                             limits=limits, limited=lim)[0] for p, lim in zip(periods, limited, strict=True)]
 
     def always_on(self, periods: list[WeatherPeriod]) -> list[dict]:
         """What never gets shed, for display: the base load parts (furnace averaged over the periods) and
@@ -338,16 +365,18 @@ class LoadModel:
                  for ld in self.loads if ld.essential and ld.in_use]
         return rows
 
-    def step_effects(self, periods: list[WeatherPeriod], level: int) -> list[dict]:
+    def step_effects(self, periods: list[WeatherPeriod], level: int, limited: list[bool] | None = None) -> list[dict]:
         """For each of the first `level` steps: energy saved over the periods and other loads it also cuts."""
         zone = ZoneInfo(self.tz)
         steps = self.active_steps()[:level]
+        limited = limited or [False] * len(periods)
         locals_ = [((p.start + dt.timedelta(hours=p.hours / 2)).astimezone(zone), p) for p in periods]
-        prev = [self.power_w(t, p.temp_c, limits={}) for t, p in locals_]
+        prev = [self.power_w(t, p.temp_c, limits={}, limited=lim) for (t, p), lim in zip(locals_, limited, strict=True)]
         out = []
         for i, st in enumerate(steps, start=1):
             limits = self._limits(i)
-            cur = [self.power_w(t, p.temp_c, limits=limits) for t, p in locals_]
+            cur = [self.power_w(t, p.temp_c, limits=limits, limited=lim)
+                   for (t, p), lim in zip(locals_, limited, strict=True)]
             saved = sum((a[0] - b[0]) * p.hours for a, b, (_, p) in zip(prev, cur, locals_, strict=True))
             target = self._load(st.load_name)
             also = sorted({name for a, b in zip(prev, cur, strict=True) for name in a[1] - b[1]} - {target.name})
@@ -424,6 +453,16 @@ def parse_load(summary: str, description: str | None, completed: bool = False) -
     w = _W.search(text)
     if not w:
         return None
+    # '7-21 unless full' is its own schedule; keep it out of the load's normal one.
+    unless_full = None
+    segments = re.split(r"([,;])", re.sub(r"\(.*?\)", "", text))
+    for i, seg in enumerate(segments):
+        if re.search(r"\bunless\s+full\b", seg, re.I):
+            parsed = parse_schedule(seg)
+            unless_full = parsed if parsed.rules else Schedule.never()
+            segments[i] = ""
+            text = "".join(segments)
+            break
     low = text.lower()
     h = _H.search(_W.sub("", text))
     hours = float(h.group(1)) if h else None
@@ -442,6 +481,7 @@ def parse_load(summary: str, description: str | None, completed: bool = False) -
         in_use=not completed,
         battery_side=bool(re.search(r"\bmeasured\b", low)),
         every_days=_every_days(re.sub(r"\(.*?\)", "", low)),  # notes in brackets don't count
+        unless_full=unless_full,
     )
 
 

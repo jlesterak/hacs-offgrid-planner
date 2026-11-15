@@ -504,3 +504,27 @@ async def test_destination_reports_failure_when_main_plan_fails(hass: HomeAssist
     hass.states.async_set("sensor.battery_soc", "unavailable")
     with pytest.raises(HomeAssistantError, match="plan failed"):
         await _plan(hass, name="Second", latitude=LAT, longitude=LON, start_date=today.isoformat(), days=2, soc=80)
+
+
+async def test_inverter_overnight_only_after_a_full_charge(hass: HomeAssistant, env, aioclient_mock, freezer) -> None:
+    entry = await _setup(hass, aioclient_mock, sky=0.1)
+    coordinator = entry.runtime_data
+    entity = "binary_sensor.off_grid_planner_inverter_overnight_ok"
+    assert hass.states.get(entity).state == "unknown"  # no load says 'unless full'
+
+    supply = next(i for i in coordinator.load_items if "supply" in i["description"])
+    supply["description"] += ", 7-21 unless full"
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    state = hass.states.get(entity)
+    assert state.state == "off" and state.attributes["reason"].startswith("not full")
+
+    hass.states.async_set("sensor.battery_soc", "100", {"device_class": "battery"})
+    freezer.tick(dt.timedelta(seconds=11))  # past the refresh debounce
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert coordinator.full_days == [dt_util.now().date().isoformat()]
+    state = hass.states.get(entity)
+    assert state.attributes["by_day"][0]["date"] == coordinator.full_days[0]
+    # Full today counts for tonight even once the SOC has dropped again (unless the week ahead needs shedding).
+    assert coordinator.data.plan.scenarios["expected"].tonight["full"]

@@ -518,3 +518,74 @@ def test_generator_runs_merge_hours_and_total_the_plan():
 def test_no_generator_runs_when_shedding_is_enough():
     sc = _plan(sky=1.0, soc=80).scenarios["expected"]
     assert generator_runs(sc) == [] and sc.step_total == 5 and sc.shed_steps == []
+
+
+# --- 'unless full': the inverter overnight only after a full charge ------------------
+
+def _night_model(rule=", 7-21 unless full"):
+    loads = (parse_load("Inverter", f"35 W idle, 24/7, supply{rule}"), parse_load("NAS", "40 W, 24/7, needs inverter"))
+    steps = (parse_step("Inverter → daytime only", "Inverter: 7-21"), parse_step("Inverter → off", "Inverter: off"))
+    return LoadModel(BaseLoad(heat_w_per_degc=0), loads, steps, tz=TZ)
+
+
+def _night_plan(skies, soc, hour_utc=15, battery=None, lm=None, **cfg):
+    """Plan from 2026-11-14 `hour_utc` (15 = 08:00 in Phoenix); skies[i] scales day i's clear sky."""
+    now = dt.datetime(2026, 11, 14, hour_utc, tzinfo=UTC)
+    start = now - dt.timedelta(hours=now.hour)
+    wx = []
+    for i, sky in enumerate(skies):
+        wx += week(start + dt.timedelta(days=i), *YUMA, sky=sky, days=1)
+    config = PlannerConfig(reserve_soc=20, tilt=TiltPlan(tilt_deg=0, tz=TZ), **cfg)
+    plan = make_plan({"expected": wx}, now, soc, *YUMA, ArrayConfig(), battery or BatteryConfig(),
+                     lm or _night_model(), GeneratorConfig(tz=TZ), config)
+    return plan.scenarios["expected"]
+
+
+def _load_at(sc, local_hour, day=14):
+    import zoneinfo
+    zone = zoneinfo.ZoneInfo(TZ)
+    return next(w for t, w in zip(sc.starts, sc.load_no_action_w, strict=True)  # nights as earned, nothing shed
+                if (t.astimezone(zone).day, t.astimezone(zone).hour) == (day, local_hour))
+
+
+def test_parse_unless_full_keeps_the_normal_schedule():
+    ld = parse_load("Inverter", "47 W measured idle, 24/7, supply, 7-21 unless full")
+    assert ld.supply and ld.schedule.describe() == "24/7" and ld.unless_full.describe() == "7-21"
+    assert parse_load("Inverter", "47 W, 24/7, supply").unless_full is None
+
+
+def test_night_is_earned_by_a_full_charge_and_the_nas_follows():
+    base, inverter_and_nas = 70.0, 35 + 40 / 0.9
+    sunny = _night_plan([1.0] * 8, soc=90)
+    assert sunny.tonight["on"] and sunny.tonight["reason"].startswith("forecast full at")
+    assert _load_at(sunny, 23) == pytest.approx(base + inverter_and_nas)
+    assert "Inverter on tonight" in advice(sunny)
+
+    dark = _night_plan([0.2] * 8, soc=60)
+    assert not any(n["on"] for n in dark.nights) and dark.tonight["reason"].startswith("not full, peak")
+    assert _load_at(dark, 23) == pytest.approx(base)  # inverter off, and the NAS with it
+    assert _load_at(dark, 12) == pytest.approx(base + inverter_and_nas)  # daytime as always
+    assert "Inverter off tonight" in advice(dark)
+
+
+def test_full_night_is_refused_when_it_would_breach_the_reserve():
+    sc = _night_plan([1.0] * 8, soc=90, battery=BatteryConfig(capacity_wh=1500))
+    assert sc.tonight["full"] and not sc.tonight["on"] and "reserve" in sc.tonight["reason"]
+    assert _load_at(sc, 23) == pytest.approx(70.0)
+
+
+def test_measured_full_today_and_last_night_count():
+    # 16:00 local on a dull day at 97 %: the simulation from now never reaches full, the morning's charge did.
+    skies = [0.2] + [1.0] * 7
+    assert not _night_plan(skies, soc=97, hour_utc=23).tonight["on"]
+    sc = _night_plan(skies, soc=97, hour_utc=23, full_today=True)
+    assert sc.tonight["on"] and sc.tonight["reason"] == "full today"
+    # 05:00 local: the night in progress follows yesterday's charge.
+    assert _load_at(_night_plan([0.2] * 8, soc=60, hour_utc=12), 5) == pytest.approx(70.0)
+    assert _load_at(_night_plan([0.2] * 8, soc=60, hour_utc=12, prev_night_earned=True), 5) > 140
+
+
+def test_without_unless_full_nothing_changes():
+    plain = _night_plan([0.2] * 8, soc=60, lm=_night_model(rule=""))
+    assert plain.nights == [] and plain.tonight is None and "tonight" not in advice(plain)
+    assert _load_at(plain, 23) == pytest.approx(70 + 35 + 40 / 0.9)

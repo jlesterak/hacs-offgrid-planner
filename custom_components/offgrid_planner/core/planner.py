@@ -6,6 +6,9 @@ For each weather scenario (e.g. "expected" and "bad week"):
      keeps SOC above the reserve. Shedding before the battery's last full charge is wasted (curtailed), so a
      bad spell later in the week does not make today shed. Entities report today's level.
   3. Generator: if applying every step is not enough, simulate generator runs.
+Before shedding, loads marked 'unless full' (e.g. the inverter overnight) get their nights: a night (the evening
+of a day and the morning after) is on only if the battery reaches a full charge that day and the night stays
+above the reserve. That is the normal plan, not shedding; shed steps stack on top.
 The overall status comes from the planning scenario (the pessimistic one when available).
 """
 from __future__ import annotations
@@ -37,6 +40,10 @@ class PlannerConfig:
     tilt: TiltPlan = field(default_factory=lambda: TiltPlan(tilt_deg=10.0))
     # True: shed_level/status/advice describe today (live plan). False: the highest day (a planned trip).
     report_today: bool = True
+    # Measured, for 'unless full' loads: the battery was full earlier today / yesterday (the night in progress
+    # before noon). The simulation only sees the hours from now on.
+    full_today: bool = False
+    prev_night_earned: bool = False
 
 
 @dataclass
@@ -65,6 +72,10 @@ class ScenarioPlan:
     load_no_action_w: list[float] = field(default_factory=list)
     day_levels: list[tuple[dt.date, int]] = field(default_factory=list)  # shed level per local day
     next_shed: dict | None = None  # first later day that needs more shedding: {date, level, steps}
+    # With 'unless full' loads, per local day: {date, full, on, full_at, peak_soc, reason}. `on`: those loads run
+    # through the night that starts that evening. Empty without such loads.
+    nights: list[dict] = field(default_factory=list)
+    tonight: dict | None = None  # today's entry (live plans only)
 
 
 @dataclass
@@ -145,7 +156,6 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
     tilt_ok = cfg.tilt.tilt_deg > 0 and gain >= cfg.tilt_min_gain_wh_per_day
     pv = tilted if tilt_ok else flat
 
-    no_action = simulate(periods, soc_now, flat, base_load, battery, reserve)
     steps = loads.active_steps()
     n = len(steps)
 
@@ -154,18 +164,52 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
 
     plan_days = sorted({local_day(p) for p in periods})
     day_i = [plan_days.index(local_day(p)) for p in periods]
-    by_level: dict[int, list[float]] = {0: base_load}
+    by_level: dict[tuple[int, bool], list[float]] = {(0, False): base_load}
 
-    def level_series(level: int) -> list[float]:
-        if level not in by_level:
-            by_level[level] = loads.series(periods, level)
-        return by_level[level]
+    def level_series(level: int, limited: bool) -> list[float]:
+        if (level, limited) not in by_level:
+            by_level[level, limited] = loads.series(periods, level, [limited] * len(periods))
+        return by_level[level, limited]
 
-    def load_for(levels: list[int]) -> list[float]:
-        return [level_series(levels[d])[i] for i, d in enumerate(day_i)]
+    # Nights for 'unless full' loads. A period belongs to the night that began on the evening of
+    # (its local time - 12 h); -1 is the night already in progress when the plan starts before noon.
+    night_rule = loads.has_night_rule
+    night_day = [(p.start + dt.timedelta(hours=p.hours / 2 - 12)).astimezone(zone).date() for p in periods]
+    night_i = [plan_days.index(d) if d in plan_days else -1 for d in night_day]
+
+    def mask(earned: list[bool]) -> list[bool]:
+        """Per period: its night has no full charge behind it, so 'unless full' schedules apply."""
+        if not night_rule:
+            return [False] * len(periods)
+        return [not (earned[n] if n >= 0 else cfg.prev_night_earned) for n in night_i]
+
+    def load_for(levels: list[int], limited: list[bool]) -> list[float]:
+        return [level_series(levels[d], limited[i])[i] for i, d in enumerate(day_i)]
+
+    earned = [False] * len(plan_days)
+    full_day = [False] * len(plan_days)
+    refused = [False] * len(plan_days)  # full, but the night would go below the reserve
+    if night_rule:
+        zero = [0] * len(plan_days)
+        for d, day in enumerate(plan_days):
+            # In order: a night only changes the SOC after its own day's charge, so earlier answers stand.
+            res = simulate(periods, soc_now, pv, load_for(zero, mask(earned)), battery, reserve)
+            full_day[d] = (any(x >= FULL_SOC for i, x in enumerate(res.soc) if day_i[i] == d)
+                           or (d == day_i[0] and soc_now >= FULL_SOC) or (day == today and cfg.full_today))
+            if not full_day[d]:
+                continue
+            trial = earned[:d] + [True] + earned[d + 1:]
+            res = simulate(periods, soc_now, pv, load_for(zero, mask(trial)), battery, reserve)
+            if min((x for i, x in enumerate(res.soc) if night_i[i] == d), default=100.0) >= reserve:
+                earned = trial
+            else:
+                refused[d] = True
+    limited = mask(earned)
+    base_load = load_for([0] * len(plan_days), limited)  # "no action" = the nights as earned, nothing shed
+    no_action = simulate(periods, soc_now, flat, base_load, battery, reserve)
 
     def run(levels: list[int]) -> SimResult:
-        return simulate(periods, soc_now, pv, load_for(levels), battery, reserve)
+        return simulate(periods, soc_now, pv, load_for(levels, limited), battery, reserve)
 
     levels = [0] * len(plan_days)
     chosen = run(levels)
@@ -192,10 +236,10 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
 
     if generator_needed:
         levels = [n] * len(plan_days)
-        plan_load = load_for(levels)
+        plan_load = load_for(levels, limited)
         chosen = _generator_plan(periods, soc_now, pv, plan_load, battery, reserve, generator)
     else:
-        plan_load = load_for(levels)
+        plan_load = load_for(levels, limited)
     today_i = plan_days.index(today) if today in plan_days else 0
     applied = 0 if not levels else levels[today_i] if cfg.report_today else max(levels, default=0)
     shed_level = None if generator_needed else applied
@@ -209,7 +253,31 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
     saving = (sum(w * p.hours for p, w in zip(periods, base_load, strict=True))
               - sum(w * p.hours for p, w in zip(periods, plan_load, strict=True))) / horizon_days
     effects = [{"step": e["step"], "saved_wh_per_day": round(e["saved_wh"] / horizon_days),
-                "also_cuts": e["also_cuts"]} for e in loads.step_effects(periods, applied)]
+                "also_cuts": e["also_cuts"]} for e in loads.step_effects(periods, applied, limited)]
+
+    nights: list[dict] = []
+    if night_rule:
+        mids = [(p.start + dt.timedelta(hours=p.hours / 2)).astimezone(zone) for p in periods]
+        for d, day in enumerate(plan_days):
+            # Earned, and no shed step takes the loads away during the night's hours.
+            kept = [loads.night_rule_on(mids[i], levels[day_i[i]]) for i, n in enumerate(night_i) if n == d]
+            night_on = earned[d] and all(k for k in kept if k is not None)
+            hit = next((i for i, x in enumerate(chosen.soc) if day_i[i] == d and x >= FULL_SOC), None)
+            full_at = None if hit is None else (periods[hit].start + dt.timedelta(hours=periods[hit].hours)
+                                                ).astimezone(zone)
+            peak = max((x for i, x in enumerate(chosen.soc) if day_i[i] == d), default=soc_now)
+            if d == day_i[0]:
+                peak = max(peak, soc_now)
+            if night_on:
+                reason = f"forecast full at {full_at:%H:%M}" if full_at else "full today"
+            elif refused[d]:
+                reason = "full, but the night would go below the reserve"
+            elif earned[d]:
+                reason = "full, but a shed step cuts it"
+            else:
+                reason = f"not full, peak {peak:.0f} %"
+            nights.append({"date": day, "full": full_day[d], "on": night_on, "full_at": full_at,
+                           "peak_soc": round(peak, 1), "reason": reason})
 
     if generator_needed:
         status = Status.GENERATOR
@@ -248,6 +316,8 @@ def plan_scenario(name: str, periods: list[WeatherPeriod], now: dt.datetime, soc
         load_no_action_w=base_load,
         day_levels=list(zip(plan_days, levels, strict=True)),
         next_shed=next_shed,
+        nights=nights,
+        tonight=nights[today_i] if nights and cfg.report_today and plan_days[today_i] == today else None,
     )
 
 
@@ -344,6 +414,13 @@ def _later(sc: ScenarioPlan) -> str:
 
 
 def advice(sc: ScenarioPlan) -> str:
+    text = _advice(sc)
+    if sc.tonight:
+        text += f" Inverter {'on' if sc.tonight['on'] else 'off'} tonight: {sc.tonight['reason']}."
+    return text
+
+
+def _advice(sc: ScenarioPlan) -> str:
     if sc.status == Status.GENERATOR:
         r = sc.with_plan
         when = r.generator_first_start.isoformat() if r.generator_first_start else "soon"

@@ -69,6 +69,7 @@ from .core.learn import Learner, Mode, Phase, apply_to_description
 from .core.loadcheck import EnergyMeter, LoadCheck, fitted_baseline_w, hour_key, last_night
 from .core.loads import BaseLoad, Load, LoadModel, ShedStep, parse_load, parse_step
 from .core.planner import (
+    FULL_SOC,
     DaySummary,
     Plan,
     PlannerConfig,
@@ -194,6 +195,8 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         # To-do style items {"uid", "summary", "description", "status"}: loads, and shed steps (top = first).
         self.load_items: list[dict[str, Any]] = []
         self.step_items: list[dict[str, Any]] = []
+        # Local dates (ISO, newest last) on which the measured SOC was full, for 'unless full' loads.
+        self.full_days: list[str] = []
         self.learner: Learner | None = None
         self.learn_uid: str | None = None
         self.learn_mode: Mode = Mode.STEP
@@ -224,6 +227,7 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         stored = await self._shed_store.async_load()
         if stored is not None and "loads" in stored:
             self.load_items, self.step_items = stored["loads"], stored.get("steps", [])
+            self.full_days = stored.get("full_days", [])
             return
         if stored is None or _is_legacy_seed(stored.get("items", [])):
             self.load_items = [_item(name, desc) for name, desc in DEFAULT_LOADS]
@@ -248,7 +252,7 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
             update()
 
     def _lists(self) -> dict[str, Any]:
-        return {"loads": self.load_items, "steps": self.step_items}
+        return {"loads": self.load_items, "steps": self.step_items, "full_days": self.full_days}
 
     async def async_save_lists(self) -> None:
         await self._shed_store.async_save(self._lists())
@@ -265,11 +269,26 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         @callback
         def _changed(event) -> None:
             new = event.data.get("new_state")
-            if (not self.last_update_success and new is not None
-                    and new.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)):
+            if new is None or new.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                return
+            try:
+                newly_full = self._note_full(float(new.state))
+            except ValueError:
+                newly_full = False
+            if not self.last_update_success or newly_full:
                 self.hass.async_create_task(self.async_request_refresh())
 
         return async_track_state_change_event(self.hass, [self.opt(CONF_SOC_ENTITY)], _changed)
+
+    @callback
+    def _note_full(self, soc: float) -> bool:
+        """Remember today as a full-charge day. True the first time today (one store write per full day)."""
+        today = dt_util.now().date().isoformat()
+        if soc < FULL_SOC or today in self.full_days:
+            return False
+        self.full_days = [*self.full_days, today][-3:]
+        self._shed_store.async_delay_save(self._lists, 60)
+        return True
 
     # --- measured load (for the model check) -----------------------------------------
 
@@ -555,6 +574,7 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         if not self._cache.get("forecast"):
             raise UpdateFailed("No forecast yet (never online since setup)")
         soc = self._soc()
+        self._note_full(soc)
         loads, steps, problems = self._loads()
         now = dt_util.utcnow()
 
@@ -567,6 +587,9 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
 
         array, battery, load_model, generator, cfg = self._configs(loads, steps, tz)
         problems += load_model.problems()
+        today = dt_util.now().date()
+        cfg = replace(cfg, full_today=today.isoformat() in self.full_days,
+                      prev_night_earned=(today - timedelta(days=1)).isoformat() in self.full_days)
 
         # The simulation is CPU-bound (a few hundred ms on a Pi at most): keep it off the event loop.
         plan = await self.hass.async_add_executor_job(
@@ -577,7 +600,10 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
 
         self.meter.prune(now)
         past = [p for p in scenarios[SCENARIO_EXPECTED] if p.start < now]
-        modelled = {hour_key(p.start): w for p, w in zip(past, load_model.series(past), strict=True)}
+        # A past hour's night (the evening 12 h back) counts as earned only if that day saw a full charge.
+        unearned = [(dt_util.as_local(p.start) - timedelta(hours=11, minutes=30)).date().isoformat()
+                    not in self.full_days for p in past] if load_model.has_night_rule else None
+        modelled = {hour_key(p.start): w for p, w in zip(past, load_model.series(past, limited=unearned), strict=True)}
         check = last_night(now, lat, lon, self.meter, modelled)
         next_day = [p for p in scenarios[SCENARIO_EXPECTED] if now <= p.start < now + timedelta(hours=24)]
 
