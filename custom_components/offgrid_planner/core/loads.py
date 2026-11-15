@@ -460,7 +460,9 @@ def parse_load(summary: str, description: str | None, completed: bool = False) -
         return None
     # '7-21 unless full' is its own schedule; keep it out of the load's normal one.
     unless_full = None
-    segments = re.split(r"([,;])", re.sub(r"\(.*?\)", "", text))
+    # A comma before it ('7-21, unless full') still means the same thing.
+    plain_text = re.sub(r"\s*[,;]\s*(?=unless\s+full\b)", " ", re.sub(r"\(.*?\)", "", text), flags=re.I)
+    segments = re.split(r"([,;])", plain_text)
     for i, seg in enumerate(segments):
         if re.search(r"\bunless\s+full\b", seg, re.I):
             parsed = parse_schedule(seg)

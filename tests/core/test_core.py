@@ -561,6 +561,8 @@ def test_parse_unless_full_keeps_the_normal_schedule():
     ld = parse_load("Inverter", "47 W measured idle, 24/7, supply, 7-21 unless full")
     assert ld.supply and ld.schedule.describe() == "24/7" and ld.unless_full.describe() == "7-21"
     assert parse_load("Inverter", "47 W, 24/7, supply").unless_full is None
+    comma = parse_load("Inverter", "47 W, 24/7, supply, 7-21, unless full")
+    assert comma.schedule.describe() == "24/7" and comma.unless_full.describe() == "7-21"
 
 
 def test_night_is_earned_by_a_full_charge_and_the_nas_follows():
