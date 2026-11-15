@@ -150,6 +150,7 @@ class Load:
     every_days: float = 1.0  # runs one day in this many ('every other day' = 2); energy averaged over all days
     # '7-21 unless full': on a night that follows no full charge the load is also held to this schedule.
     unless_full: Schedule | None = None
+    schedule_given: bool = True  # False: watts only, no hours or schedule, so it counts as 24/7
 
     def describe(self) -> str:
         when = self.schedule.describe()
@@ -255,6 +256,10 @@ class LoadModel:
                 out.append(f"Shed step '{st.label}': no load named '{st.load_name}'")
         if sum(1 for ld in self.loads if ld.supply) > 1:
             out.append("More than one load is marked 'supply'; only the first is used")
+        for ld in self.loads:
+            if ld.in_use and not ld.schedule_given:
+                out.append(f"Load '{ld.name}': no hours or schedule, so it counts as 24/7 "
+                           f"({ld.watts * 24 / 1000:.2f} kWh/day). Add '24/7' or its hours (e.g. '2 h/day in 8-20').")
         out += self._base_overlap_problems()
         out += self._duty_outside_supply()
         return out
@@ -470,11 +475,15 @@ def parse_load(summary: str, description: str | None, completed: bool = False) -
         hours /= 7  # '3 h/week' = spread over every day
     is_supply = bool(re.search(r"\bsupply\b", low))
     needs = not is_supply and not re.search(r"\bdc\b", low)
+    plain = re.sub(r"\(.*?\)", "", text)
+    schedule = parse_schedule(plain)
     return Load(
         name=summary.strip(),
         watts=float(w.group(1)),
         hours_per_day=hours if hours is not None and hours < 24 else None,
-        schedule=parse_schedule(re.sub(r"\(.*?\)", "", text)),
+        schedule=schedule,
+        schedule_given=bool(schedule.rules or hours is not None or unless_full is not None
+                            or re.search(r"24/7|\balways\b|\ball day\b", plain, re.I)),
         needs_inverter=needs,
         supply=is_supply,
         essential=bool(re.search(r"\b(essential|never shed|keep)\b", low)),

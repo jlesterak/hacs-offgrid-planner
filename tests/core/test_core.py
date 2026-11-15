@@ -169,7 +169,7 @@ def test_step_effects_report_dependent_loads():
 
 
 def test_problems_flag_unknown_load():
-    lm = LoadModel(BaseLoad(), (parse_load("NAS", "40 W"),), (parse_step("Ghost → off", "Ghost: off"),))
+    lm = LoadModel(BaseLoad(), (parse_load("NAS", "40 W, 24/7"),), (parse_step("Ghost → off", "Ghost: off"),))
     assert lm.problems() == ["Shed step 'Ghost → off': no load named 'Ghost'"]
     assert lm.active_steps() == []
 
@@ -489,7 +489,7 @@ def test_conditions_parse_current_and_daily():
 def test_listed_fridge_replaces_the_base_fridge_and_is_flagged():
     base = BaseLoad(baseline_w=40, fridge_w=27, heat_w_per_degc=0)
     noon = dt.datetime(2026, 9, 14, 12, tzinfo=UTC)
-    alone = LoadModel(base, (parse_load("Vent fan - front", "16 W, DC"),), tz="UTC")
+    alone = LoadModel(base, (parse_load("Vent fan - front", "16 W, 24/7, DC"),), tz="UTC")
     assert alone.power_w(noon, 10.0)[0] == pytest.approx(40 + 27 + 16)
     assert alone.problems() == []  # 'vent fan' is not the toilet fan
     listed = LoadModel(base, (parse_load("Fridge", "40 W, 24/7, DC"),), tz="UTC")
@@ -589,3 +589,14 @@ def test_without_unless_full_nothing_changes():
     plain = _night_plan([0.2] * 8, soc=60, lm=_night_model(rule=""))
     assert plain.nights == [] and plain.tonight is None and "tonight" not in advice(plain)
     assert _load_at(plain, 23) == pytest.approx(70 + 35 + 40 / 0.9)
+
+
+def test_problem_when_a_load_has_watts_but_no_schedule():
+    def problems(desc, completed=False):
+        lm = LoadModel(BaseLoad(), (parse_load("Heater", desc, completed),), (), tz=TZ)
+        return [p for p in lm.problems() if "no hours or schedule" in p]
+
+    assert "2.26 kWh/day" in problems("94 W measured")[0]
+    assert not problems("94 W measured", completed=True)
+    for ok in ("94 W, 24/7", "94 W, 2 h/day", "94 W, 8-17", "94 W, weekends", "94 W, always", "94 W, off unless full"):
+        assert not problems(ok), ok
