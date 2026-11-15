@@ -26,7 +26,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import SCENARIO_EXPECTED
 from .coordinator import OffgridConfigEntry, PlannerData, air_now, air_window
 from .core.learn import Phase
-from .core.planner import ScenarioPlan, Status, advice, generator_runs, generator_runs_iso, week_rows
+from .core.planner import LEVELS, ScenarioPlan, Status, advice, generator_runs, generator_runs_iso, week_rows
 from .entity import OffgridEntity
 
 STATUS_OPTIONS = [s.name.lower() for s in Status]
@@ -94,6 +94,15 @@ SENSORS: tuple[PlannerSensorDescription, ...] = (
                          "tilt_recommended": _expected(d).tilt_recommended,
                          "weather_stale": d.weather_stale,
                          "ensemble": d.ensemble}),
+    PlannerSensorDescription(
+        key="power_level", device_class=SensorDeviceClass.ENUM, options=list(LEVELS),
+        value=lambda d: d.level,
+        attrs=lambda d: {"reason": d.level_reason,
+                         # Today is the live level (with the measured-SOC backstop); later days are forecast.
+                         "by_day": [{"date": day.isoformat(), "level": d.level if i == 0 else level}
+                                    for i, (day, level) in enumerate(d.level_by_day)],
+                         "shed_steps": _planning(d).shed_steps,
+                         "inverter_overnight": _expected(d).tonight["on"] if _expected(d).tonight else None}),
     PlannerSensorDescription(
         key="min_soc_expected", native_unit_of_measurement=PERCENTAGE, device_class=SensorDeviceClass.BATTERY,
         suggested_display_precision=0,

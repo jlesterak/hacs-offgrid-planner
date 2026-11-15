@@ -436,6 +436,52 @@ def _advice(sc: ScenarioPlan) -> str:
     return ("No shedding needed today." + _later(sc)) if sc.next_shed else "No action needed."
 
 
+# One word for "how are we doing", for automations (lights, decorative loads) and the dashboard.
+LEVELS = ("surplus", "normal", "conserve", "critical")
+NORMAL_MAX_SHED = 2  # the first steps are the easy ones (skip the espresso): still a normal day
+CONSERVE_MARGIN = 10.0  # measured SOC this close to the reserve is 'conserve' whatever the forecast says
+CRITICAL_MARGIN = 5.0
+LEVEL_HYSTERESIS = 5.0  # points above a margin before the measured-SOC rule lets go
+
+
+def _day_level(shed_level: int, generator: bool, night_on: bool) -> str:
+    if generator:
+        return "critical"
+    if shed_level > NORMAL_MAX_SHED:
+        return "conserve"
+    return "surplus" if night_on and shed_level == 0 else "normal"
+
+
+def level_by_day(expected: ScenarioPlan, planning: ScenarioPlan) -> list[tuple[dt.date, str]]:
+    """The forecast level per local day: shedding from the planning scenario, the earned night from that day's
+    expected weather."""
+    nights = {n["date"]: n["on"] for n in expected.nights}
+    return [(day, _day_level(level, planning.generator_needed, nights.get(day, False)))
+            for day, level in planning.day_levels]
+
+
+def power_level(expected: ScenarioPlan, planning: ScenarioPlan, soc: float, reserve: float,
+                previous: str | None = None) -> tuple[str, str]:
+    """Today's level and why. The forecast decides; the measured SOC is the backstop, so a stale or rosy forecast
+    cannot hide a low battery. `previous` gives the backstop its hysteresis."""
+    critical_below = reserve + CRITICAL_MARGIN + (LEVEL_HYSTERESIS if previous == "critical" else 0)
+    conserve_below = reserve + CONSERVE_MARGIN + (LEVEL_HYSTERESIS if previous in ("conserve", "critical") else 0)
+    shed = len(planning.shed_steps)
+    if planning.generator_needed:
+        return "critical", "generator needed even with every shed step applied"
+    if soc < critical_below:
+        return "critical", f"battery {soc:.0f} % is close to the {reserve:.0f} % reserve"
+    if shed > NORMAL_MAX_SHED:
+        return "conserve", f"shed {_steps_range(shed)} today: {'; '.join(planning.shed_steps)}"
+    if soc < conserve_below:
+        return "conserve", f"battery {soc:.0f} % is within {conserve_below - reserve:.0f} points of the reserve"
+    if shed:
+        return "normal", f"skip today: {'; '.join(planning.shed_steps)}"
+    if expected.tonight and expected.tonight["on"]:
+        return "surplus", f"{expected.tonight['reason']}: fine to leave things on overnight"
+    return "normal", "no shedding needed today"
+
+
 def make_plan(scenarios: dict[str, list[WeatherPeriod]], now: dt.datetime, soc_now: float,
               lat: float, lon: float, array: ArrayConfig, battery: BatteryConfig, loads: LoadModel,
               generator: GeneratorConfig | None, cfg: PlannerConfig,

@@ -6,7 +6,7 @@ import logging
 import math
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -76,8 +76,10 @@ from .core.planner import (
     advice,
     daily_summary,
     generator_runs_iso,
+    level_by_day,
     make_plan,
     model_day_pv,
+    power_level,
     week_rows,
 )
 from .core.pv import ArrayConfig, TiltPlan
@@ -125,6 +127,9 @@ class PlannerData:
     ensemble: dict[str, dict[str, float | int]]  # per ensemble model: members, low-member ÷ median
     air: list[AirPeriod]
     destination: Destination | None = None
+    level: str = "normal"  # surplus / normal / conserve / critical, today
+    level_reason: str = ""
+    level_by_day: list[tuple[date, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -199,6 +204,7 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
         self.step_items: list[dict[str, Any]] = []
         # Local dates (ISO, newest last) on which the measured SOC was full, for 'unless full' loads.
         self.full_days: list[str] = []
+        self._level: str | None = None  # the last power level, for its hysteresis
         self.learner: Learner | None = None
         self.learn_uid: str | None = None
         self.learn_mode: Mode = Mode.STEP
@@ -599,6 +605,8 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
             SCENARIO_BAD if SCENARIO_BAD in scenarios else SCENARIO_EXPECTED)
 
         daily = {name: daily_summary(sc, tz) for name, sc in plan.scenarios.items()}
+        expected, planning = plan.scenarios[SCENARIO_EXPECTED], plan.scenarios[plan.planning_scenario]
+        self._level, level_reason = power_level(expected, planning, soc, cfg.reserve_soc, self._level)
 
         self.meter.prune(now)
         past = [p for p in scenarios[SCENARIO_EXPECTED] if p.start < now]
@@ -625,4 +633,6 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
                            baseline_fit_w=fitted_baseline_w(check, load_model.base.baseline_w) if check else None,
                            model_pv=model_pv, ensemble=ensemble,
                            air=parse_air(self._slow["air"]) if self._slow.get("air") else [],
-                           destination=await self._destination(loads, steps))
+                           destination=await self._destination(loads, steps),
+                           level=self._level, level_reason=level_reason,
+                           level_by_day=level_by_day(expected, planning))

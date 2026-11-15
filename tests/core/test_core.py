@@ -4,7 +4,16 @@ import math
 import pytest
 from core.battery import BatteryConfig, GeneratorConfig, simulate
 from core.loads import BaseLoad, LoadModel, parse_load, parse_step
-from core.planner import PlannerConfig, Status, advice, generator_runs, make_plan, model_day_pv
+from core.planner import (
+    PlannerConfig,
+    Status,
+    advice,
+    generator_runs,
+    level_by_day,
+    make_plan,
+    model_day_pv,
+    power_level,
+)
 from core.pv import ArrayConfig, TiltPlan, low_sun_factor, pv_series
 from core.solar import erbs_split, position
 from core.weather import (
@@ -600,3 +609,32 @@ def test_problem_when_a_load_has_watts_but_no_schedule():
     assert not problems("94 W measured", completed=True)
     for ok in ("94 W, 24/7", "94 W, 2 h/day", "94 W, 8-17", "94 W, weekends", "94 W, always", "94 W, off unless full"):
         assert not problems(ok), ok
+
+
+# --- power level -------------------------------------------------------------
+
+def test_power_level_from_forecast_with_measured_soc_backstop():
+    sunny = _night_plan([1.0] * 8, soc=90)
+    assert power_level(sunny, sunny, 90, 20)[0] == "surplus"
+    assert [lv for _, lv in level_by_day(sunny, sunny)][:2] == ["surplus", "normal"]
+    # The measured SOC overrides a good forecast, and lets go only 5 points higher.
+    assert power_level(sunny, sunny, 29, 20)[0] == "conserve"
+    assert power_level(sunny, sunny, 24, 20)[0] == "critical"
+    assert power_level(sunny, sunny, 32, 20)[0] == "surplus"
+    assert power_level(sunny, sunny, 32, 20, previous="conserve")[0] == "conserve"
+    assert power_level(sunny, sunny, 27, 20, previous="critical")[0] == "critical"
+
+    dark = _night_plan([0.2] * 8, soc=60)
+    assert dark.generator_needed and power_level(dark, dark, 60, 20)[0] == "critical"
+    assert {lv for _, lv in level_by_day(dark, dark)} == {"critical"}
+
+
+def test_power_level_normal_allows_the_first_two_shed_steps():
+    from dataclasses import replace
+    sc = _night_plan([1.0] * 8, soc=90, lm=_night_model(rule=""))
+    one = replace(sc, shed_steps=["Espresso → off"], day_levels=[(d, 1) for d, _ in sc.day_levels])
+    assert power_level(one, one, 60, 20) == ("normal", "skip today: Espresso → off")
+    three = replace(sc, shed_steps=["a", "b", "c"], day_levels=[(d, 3) for d, _ in sc.day_levels])
+    assert power_level(three, three, 60, 20)[0] == "conserve"
+    assert {lv for _, lv in level_by_day(three, three)} == {"conserve"}
+    assert power_level(sc, sc, 60, 20) == ("normal", "no shedding needed today")  # no 'unless full': no surplus

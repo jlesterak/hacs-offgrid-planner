@@ -130,6 +130,9 @@ async def test_setup_creates_entities_and_plans(hass: HomeAssistant, env, aiocli
     assert hass.states.get("sensor.off_grid_planner_solar_rest_of_today") is not None
     assert hass.states.get("number.off_grid_planner_reserve_soc").state == "20.0"
     assert hass.states.get("sensor.off_grid_planner_learning").state == "idle"
+    level = hass.states.get("sensor.off_grid_planner_power_level")
+    assert level.state in ("normal", "conserve", "critical") and level.attributes["reason"]
+    assert level.attributes["by_day"][0]["level"] == level.state
     for _method, url, *_ in aioclient_mock.mock_calls:
         assert url.query["latitude"] == "32.69" and url.query["longitude"] == "-114.63"
 
