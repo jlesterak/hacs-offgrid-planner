@@ -461,7 +461,7 @@ def test_conditions_parse_current_and_daily():
     import datetime as dt
     from zoneinfo import ZoneInfo
 
-    from custom_components.offgrid_planner.core.weather import (
+    from core.weather import (
         current_conditions,
         daily_conditions,
         parse_conditions,
