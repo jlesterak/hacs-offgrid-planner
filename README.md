@@ -36,11 +36,17 @@ This one assumes it isn't.
     Days: `mon wed fri`, `mon-fri`, `fri-sun`, `weekdays`, `weekends`. Less than daily: `every other day`,
     `every 3 days`, `twice a week`, `3 times per month`, `3 h/week`; these are averaged over every day, because the
     planner can't know which days they fall on.
+    **Only after a full charge**: `35 W idle, 24/7, supply, 7-21 unless full` keeps the inverter (and every load
+    that needs it) to 07–21, except on a night after the battery reached 100 %: then it stays on that evening and
+    the morning after, provided the night stays above the reserve. Works on any load (`NAS: 40 W, 24/7, 18-22
+    unless full`). The planner decides each night of the week in order, before any shedding; a full charge it
+    measured earlier today counts even after the SOC has dropped again. It only advises: nothing is switched.
   - **Shed steps**: ordered cutbacks, top first, drag to reorder. Each step cuts one load to a schedule:
     `NAS: 18-22`, `Starlink + router: 8-17 weekdays, off weekends`, `Inverter: off`. Steps apply cumulatively;
     the most restrictive schedule for a load wins, and cutting the inverter also stops the AC loads that need
     it (the advice lists what else each step cuts and how much it saves).
-  - Items the planner can't parse are listed in the Status `problems` attribute, and so is a duty load (`h/day in …`)
+  - Items the planner can't parse are listed in the Status `problems` attribute, and so are a load with watts
+    but no hours or schedule (it counts as 24/7), a load model check far from 1 (see Entities), and a duty load (`h/day in …`)
     whose window reaches outside the inverter's hours: its time is spread over the whole window, so that share is lost.
   - Don't list what the base already carries. A listed **fridge** or **furnace** replaces the base's own term (so it
     counts once) and is noted in `problems`; a listed Pi, WLED, toilet fan or BMS/shunt is part of the measured
@@ -56,6 +62,20 @@ This one assumes it isn't.
   spell on Thursday doesn't make you shed on Monday; the plan is redone every hour.
 
 ## Entities
+
+**Power level** (`sensor.off_grid_planner_power_level`): one word for automations and dashboards, with a `reason`
+and a `by_day` forecast. Point your lights and optional loads at this instead of at SOC thresholds of their own.
+
+| Level | When |
+|---|---|
+| `surplus` | tonight is earned: full today (or forecast full) and nothing to shed, so `unless full` loads may stay on overnight |
+| `normal` | at most the first two shed steps today (put the painless ones at the top of the list) |
+| `conserve` | three or more shed steps today, or the measured SOC within 10 points of the reserve |
+| `critical` | a generator is needed even with every step applied, or the SOC within 5 points of the reserve |
+
+The forecast decides; the measured SOC is the backstop (it lets go 5 points higher), so a stale forecast cannot
+hide a low battery. **Inverter overnight OK** (binary sensor, unknown until a load says `unless full`) is tonight's
+answer on its own, with `reason`, `peak_soc`, `full_at`, the bad-week answer and `by_day`.
 
 Status (`ok` / `tilt` / `shed` / `generator`, with an `advice` attribute), lowest SOC next 7 days
 (expected and bad week, with an hourly `soc_forecast` attribute that isn't recorded), reserve reached
