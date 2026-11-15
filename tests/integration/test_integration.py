@@ -359,6 +359,14 @@ async def test_load_model_check_from_metered_night(hass: HomeAssistant, env, aio
     assert check.attributes["hours"] >= 4
     ratio = check.attributes["measured_wh"] / check.attributes["modelled_wh"]
     assert float(check.state) == pytest.approx(ratio, abs=0.01)
+    drift = [p for p in hass.states.get("sensor.off_grid_planner_status").attributes["problems"] if "real use" in p]
+    assert bool(drift) == (not 0.7 <= ratio <= 1.3)
+    for key in coordinator.meter.hours:  # a night at three times the draw is always reported
+        coordinator.meter.hours[key] = [150.0 * 3 / ratio, 3600.0]
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert any("real use was 3.00× the model" in p
+               for p in hass.states.get("sensor.off_grid_planner_status").attributes["problems"])
     # Live metering integrates the battery power sensor (-45 W = 45 W discharge).
     for _ in range(4):
         freezer.tick(dt.timedelta(seconds=5))

@@ -103,6 +103,8 @@ from .core.weather import (
 
 _LOGGER = logging.getLogger(__name__)
 
+MODEL_CHECK_OK = (0.7, 1.3)  # last night's measured ÷ modelled load outside this band is reported as a problem
+
 type OffgridConfigEntry = ConfigEntry[OffgridCoordinator]
 
 
@@ -605,6 +607,9 @@ class OffgridCoordinator(DataUpdateCoordinator[PlannerData]):
                     not in self.full_days for p in past] if load_model.has_night_rule else None
         modelled = {hour_key(p.start): w for p, w in zip(past, load_model.series(past, limited=unearned), strict=True)}
         check = last_night(now, lat, lon, self.meter, modelled)
+        if check and check.modelled_wh > 0 and not MODEL_CHECK_OK[0] <= check.ratio <= MODEL_CHECK_OK[1]:
+            problems.append(f"Last night's real use was {check.ratio:.2f}× the model ({check.measured_wh:.0f} vs "
+                            f"{check.modelled_wh:.0f} Wh): relearn the night loads or refit the baseline.")
         next_day = [p for p in scenarios[SCENARIO_EXPECTED] if now <= p.start < now + timedelta(hours=24)]
 
         models = parse_models(self._cache["models"]) if self._cache.get("models") else {}
